@@ -144,6 +144,7 @@ const S = {
   mdBlock: null as MdBlock | null,
   curTurnId: null as string | null,
   curTurnBlocks: [] as MdBlock[],
+  attachments: [] as { name: string; data_url: string }[],
   pendingDocs: new Map<string, string>(),
   planDict: null as Record<string, any> | null,
 };
@@ -1505,12 +1506,16 @@ function send() {
   const prompt = input.value.trim();
   if (!prompt || S.busy || !S.root) return;
   input.value = "";
+  const images = S.attachments.slice();
+  S.attachments = [];
+  renderAttachStrip();
   const task = ($("task-combo") as HTMLSelectElement).value;
   const taskType = task === "(auto)" ? null : task;
   if (S.mode === 1) {
+    if (images.length) chat.line("\n[plan mode: images are not sent to the planner]", "c-warn");
     call("submit_plan", { goal: prompt }).then((r) => afterSubmit(r));
   } else {
-    call("submit", { prompt, task_type: taskType }).then((r) => afterSubmit(r));
+    call("submit", { prompt, task_type: taskType, images }).then((r) => afterSubmit(r));
   }
 }
 
@@ -1565,6 +1570,9 @@ function onEvent(ev: AgentEvent) {
     S.thinkChars = 0;
     chat.line(`\nYou  [${d.task_type}]  ${stampOf(ev.ts)}`, "c-user");
     chat.line(d.prompt);
+    if (Array.isArray(d.images) && d.images.length) {
+      chat.line(`[images: ${d.images.join(", ")}]`, "c-muted");
+    }
     log(ev, `task type ${d.task_type}`);
     refreshTurnList();
     refreshSessionList();
@@ -1829,7 +1837,7 @@ $("attach-btn").addEventListener("click", async () => {
   for (const f of files) await insertFile(f);
 });
 
-// Drag & drop files onto the prompt: insert their content.
+// Drag & drop files onto the prompt: text files are inserted, images attached.
 const inputEl = $("input") as HTMLTextAreaElement;
 inputEl.addEventListener("dragover", (e) => {
   e.preventDefault();
@@ -1837,10 +1845,125 @@ inputEl.addEventListener("dragover", (e) => {
 });
 inputEl.addEventListener("drop", async (e) => {
   e.preventDefault();
-  const files = Array.from(e.dataTransfer!.files).map((f: any) => f.path).filter(Boolean);
+  const files = Array.from(e.dataTransfer!.files);
   if (!files.length) return; // plain text drop: let the browser handle it
-  for (const f of files) await insertFile(f);
+  for (const f of files) {
+    if (f.type.startsWith("image/")) await addImageFile(f);
+    else await insertFile((f as any).path);
+  }
 });
+
+// ------------------------------------------------------------------ image attach
+// Pasted / dropped / picked images become attachments sent with the prompt as
+// image_url parts (OpenAI-compatible vision). Kept as downscaled data URLs.
+const MAX_IMAGES = 5;
+const MAX_IMAGE_MB = 10;
+const MAX_IMAGE_EDGE = 1568; // ~token-friendly size for common vision models
+
+function imageThumbStrip() { return $("attach-strip") as HTMLElement; }
+
+function renderAttachStrip() {
+  const strip = imageThumbStrip();
+  strip.innerHTML = "";
+  for (const [i, a] of S.attachments.entries()) {
+    const item = document.createElement("div");
+    item.className = "attach-item";
+    const img = document.createElement("img");
+    img.src = a.data_url;
+    img.title = a.name;
+    const x = document.createElement("button");
+    x.className = "attach-x";
+    x.textContent = "✕";
+    x.title = "remove";
+    x.addEventListener("click", () => { S.attachments.splice(i, 1); renderAttachStrip(); });
+    item.appendChild(img);
+    item.appendChild(x);
+    strip.appendChild(item);
+  }
+  strip.classList.toggle("hidden", S.attachments.length === 0);
+}
+
+function fileToDataUrl(f: File): Promise<string> {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result));
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(f);
+  });
+}
+
+// Downscale large images on a canvas so the payload (and token cost) stays small.
+async function downscale(f: File, dataUrl: string): Promise<string> {
+  if (f.size < 1_000_000) return dataUrl; // small enough as-is
+  try {
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const el = new Image();
+      el.onload = () => res(el);
+      el.onerror = () => rej(new Error("decode failed"));
+      el.src = dataUrl;
+    });
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.width, img.height));
+    if (scale >= 1) return dataUrl;
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.width * scale);
+    c.height = Math.round(img.height * scale);
+    c.getContext("2d")!.drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.85);
+  } catch {
+    return dataUrl; // not decodable: send as-is, let the model side complain if needed
+  }
+}
+
+async function addImages(items: { name: string; data_url: string }[]) {
+  for (const a of items) {
+    if (S.attachments.length >= MAX_IMAGES) {
+      chat.line(`\n[max ${MAX_IMAGES} images per message]`, "c-warn");
+      break;
+    }
+    if (a.data_url.length > MAX_IMAGE_MB * 1024 * 1024) {
+      chat.line(`\n[skipped ${a.name}: over ${MAX_IMAGE_MB} MB]`, "c-warn");
+      continue;
+    }
+    S.attachments.push(a);
+  }
+  renderAttachStrip();
+}
+
+async function addImageFile(f: File) {
+  if (f.size > MAX_IMAGE_MB * 1024 * 1024) {
+    chat.line(`\n[skipped ${f.name}: over ${MAX_IMAGE_MB} MB]`, "c-warn");
+    return;
+  }
+  const dataUrl = await fileToDataUrl(f);
+  const scaled = await downscale(f, dataUrl);
+  await addImages([{ name: f.name, data_url: scaled }]);
+}
+
+// paste: images from the clipboard (screenshots, copied pictures)
+inputEl.addEventListener("paste", (e) => {
+  const files: File[] = [];
+  for (const it of Array.from(e.clipboardData?.items ?? [])) {
+    if (it.type.startsWith("image/")) {
+      const f = it.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (!files.length) return;
+  e.preventDefault();
+  // returns the attach promise (also used by the CDP paste test)
+  return Promise.all(files.map((f) => addImageFile(f))).then(() => S.attachments.length);
+});
+
+$("image-btn").addEventListener("click", async () => {
+  const files = await window.api.pickImages();
+  await addImages(files);
+});
+
+// exposed for automated UI tests (CDP)
+(window as any).__addImageAttachment = (name: string, dataUrl: string) =>
+  addImages([{ name, data_url: dataUrl }]).then(() => S.attachments.length);
+Object.defineProperty(window, "__attachments", { get: () => S.attachments });
+Object.defineProperty(window, "__root", { get: () => S.root });
 
 // ------------------------------------------------------------------ wiring
 $("send-btn").addEventListener("click", () => {

@@ -293,6 +293,18 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
   padding: 8px;
 }
 #send-row { display: flex; justify-content: flex-end; padding-top: 4px; gap: 8px; }
+#attach-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 0; }
+.attach-item { position: relative; }
+.attach-item img {
+  width: 44px; height: 44px; object-fit: cover; border-radius: 6px;
+  border: 1px solid var(--border, #555);
+}
+.attach-x {
+  position: absolute; top: -6px; right: -6px; width: 16px; height: 16px;
+  margin: 0; padding: 0; line-height: 14px; font-size: 10px; border-radius: 50%;
+  border: 1px solid var(--border, #555); background: var(--bg, #222); color: inherit;
+  cursor: pointer;
+}
 .flex1 { flex: 1; }
 
 /* action row after a finished turn: re-send / copy answer */

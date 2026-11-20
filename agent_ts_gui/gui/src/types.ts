@@ -24,6 +24,7 @@ export interface Api {
   onEvent: (cb: (ev: AgentEvent) => void) => void;
   pickDirectory: () => Promise<string | null>;
   pickFiles: () => Promise<string[]>;
+  pickImages: () => Promise<{ name: string; data_url: string }[]>;
   readFile: (p: string) => Promise<{ content?: string; error?: string }>;
   getLastProject: () => Promise<string | null>;
   setLastProject: (p: string) => Promise<void>;

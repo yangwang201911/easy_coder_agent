@@ -1,7 +1,7 @@
 // Measure boot timing: page visible vs backend ready vs project opened.
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 
-const app = spawnApp({ root: process.env.TEST_ROOT || "/home/xiping/mygitee/my_coder_agent/agent_ts_gui" });
+const app = spawnApp({ root: process.env.TEST_ROOT || "/mnt/data_sdb/ywang2/my_coder_agent/agent_ts_gui" });
 
 const t0 = Date.now();
 const ts = (label) => console.log(`t=${Date.now() - t0}ms  ${label}`);

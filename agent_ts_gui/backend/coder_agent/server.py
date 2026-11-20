@@ -44,6 +44,27 @@ from .session import Session
 
 ProviderFactory = Optional[Callable[[], LLMProvider]]  # injectable for tests
 
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # base64 data_url size cap per attachment
+
+
+def _validate_images(raw: Any) -> Optional[list[dict]]:
+    """Validate GUI image attachments: [{"name": str, "data_url": "data:image/..."}]."""
+    if not raw:
+        return None
+    if not isinstance(raw, list) or len(raw) > 5:
+        raise ValueError("images must be a list of at most 5 attachments")
+    out: list[dict] = []
+    for img in raw:
+        if not isinstance(img, dict):
+            raise ValueError("each image must be an object")
+        url = img.get("data_url")
+        if not isinstance(url, str) or not url.startswith("data:image/") or "," not in url:
+            raise ValueError("image data_url must be a data:image/... URL")
+        if len(url) > MAX_IMAGE_BYTES:
+            raise ValueError(f"image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
+        out.append({"name": str(img.get("name") or "image"), "data_url": url})
+    return out
+
 
 # --------------------------------------------------------------- async asks
 class _Pending:
@@ -306,7 +327,8 @@ class Server:
     def submit(self, p: dict) -> dict:
         e = self._require_engine()
         prompt, task_type = p.get("prompt", ""), p.get("task_type")
-        return self._start_turn(lambda: e.submit(prompt, task_type))
+        images = _validate_images(p.get("images"))
+        return self._start_turn(lambda: e.submit(prompt, task_type, images))
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.

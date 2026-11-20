@@ -35,6 +35,7 @@ class Turn:
     parent_id: Optional[str]
     prompt: str
     task_type: str = "general"
+    images: list[str] = field(default_factory=list)  # attached image names (display only; data is in messages)
     messages: list[dict] = field(default_factory=list)  # model view since the last compaction
     base_messages: Optional[list[dict]] = None  # full compacted history, set when compaction ran in this turn
     archive: list[dict] = field(default_factory=list)  # this turn's messages removed by compaction (display only)
@@ -80,8 +81,20 @@ class Session:
         return out
 
     # --------------------------------------------------------------- turns
-    def new_turn(self, prompt: str, task_type: str = "general") -> Turn:
-        t = Turn(_id(), self.head, prompt, task_type, [{"role": "user", "content": prompt}])
+    def new_turn(self, prompt: str, task_type: str = "general", images: Optional[list[dict]] = None) -> Turn:
+        """``images``: [{"name": str, "data_url": "data:image/..."}] attached to the user message."""
+        content: str | list[dict] = prompt
+        names: list[str] = []
+        if images:
+            parts: list[dict] = [{"type": "text", "text": prompt}]
+            for img in images:
+                url = img.get("data_url", "")
+                if not url.startswith("data:image/"):
+                    raise ValueError(f"invalid image attachment: {img.get('name', '?')}")
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+                names.append(img.get("name") or "image")
+            content = parts
+        t = Turn(_id(), self.head, prompt, task_type, names, [{"role": "user", "content": content}])
         self.turns[t.id] = t
         self.head = t.id
         self.snapshots.begin(t.id)

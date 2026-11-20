@@ -12,7 +12,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const ROOT = process.env.TEST_ROOT || "/home/xiping/mygitee/my_coder_agent/agent_ts_gui";
+const ROOT = process.env.TEST_ROOT || "/mnt/data_sdb/ywang2/my_coder_agent/agent_ts_gui";
 const PORT = 8932; // isolated port so we own the server
 const B = path.join(__dirname, "..", "backend");
 const venv = path.join(B, ".venv", "bin", "python");

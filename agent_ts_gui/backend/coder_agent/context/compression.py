@@ -95,8 +95,11 @@ def render_transcript(messages: list[dict], per_message_chars: int = 1500) -> st
     for m in messages:
         role = m.get("role", "?")
         content = m.get("content") or ""
-        if not isinstance(content, str):
-            content = str(content)
+        if isinstance(content, list):  # multimodal (text + image parts)
+            content = "\n".join(
+                p.get("text", f"[image: {p.get('image_url', {}).get('url', '')[:60]}]")
+                for p in content if isinstance(p, dict)
+            )
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {})
             content += f"\n[call {fn.get('name')}({truncate_middle(fn.get('arguments', ''), 400)})]"

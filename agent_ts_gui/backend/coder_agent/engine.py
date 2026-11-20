@@ -69,16 +69,24 @@ class Engine:
         self.cancel_event.set()
 
     # ----------------------------------------------------------------- run
-    def submit(self, prompt: str, task_type: Optional[str] = None) -> AgentResult:
-        """Run one user turn to completion (blocking - call from a worker thread)."""
+    def submit(
+        self,
+        prompt: str,
+        task_type: Optional[str] = None,
+        images: Optional[list[dict]] = None,
+    ) -> AgentResult:
+        """Run one user turn to completion (blocking - call from a worker thread).
+
+        ``images``: [{"name": str, "data_url": "data:image/..."}] sent to the model
+        as image_url parts of the user message (needs a vision-capable model)."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
         try:
             self.cancel_event.clear()
             tt = self.task_types.get(task_type or self.task_types.detect(prompt))
-            turn = self.session.new_turn(prompt, tt.name)
+            turn = self.session.new_turn(prompt, tt.name, images)
             self.session.save()
-            self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt)
+            self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt, images=turn.images)
 
             provider = self._provider_override or create_provider(self.config)
             registry = self.registry.subset(tt.tools) if tt.tools else self.registry

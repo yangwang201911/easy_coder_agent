@@ -72,10 +72,12 @@
       </div>
       <div class="splitter h" id="split-input" title="Drag to resize, double-click to reset"></div>
       <div id="input-zone">
-        <textarea id="input" placeholder="Describe the task...  (Enter to send, Ctrl+Enter for newline)"></textarea>
+        <div id="attach-strip" class="hidden"></div>
+        <textarea id="input" placeholder="Describe the task...  (Enter to send, Ctrl+Enter for newline, paste images to attach)"></textarea>
         <div id="send-row">
           <span class="flex1"></span>
           <button id="attach-btn" title="Insert a file's content into the prompt">📎 File</button>
+          <button id="image-btn" title="Attach images (or paste screenshots)">🖼 Image</button>
           <button id="send-btn">Send</button>
         </div>
       </div>

@@ -317,6 +317,26 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(window, { properties: ["openFile", "multiSelections"] });
     return r.canceled ? [] : r.filePaths;
   });
+  ipcMain.handle("pick-images", async () => {
+    if (!window) return [];
+    const r = await dialog.showOpenDialog(window, {
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+    });
+    if (r.canceled) return [];
+    const out: { name: string; data_url: string }[] = [];
+    for (const p of r.filePaths) {
+      try {
+        const buf = fs.readFileSync(p);
+        const mime = p.toLowerCase().endsWith(".jpg") || p.toLowerCase().endsWith(".jpeg") ? "image/jpeg"
+          : p.toLowerCase().endsWith(".png") ? "image/png"
+          : p.toLowerCase().endsWith(".gif") ? "image/gif"
+          : p.toLowerCase().endsWith(".webp") ? "image/webp" : "image/bmp";
+        out.push({ name: p.slice(p.lastIndexOf("/") + 1), data_url: `data:${mime};base64,${buf.toString("base64")}` });
+      } catch { /* unreadable file: skip */ }
+    }
+    return out;
+  });
   ipcMain.handle("read-file", (_e, p: string): { content?: string; error?: string } => {
     try {
       const buf = fs.readFileSync(p);

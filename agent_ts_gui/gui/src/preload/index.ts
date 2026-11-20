@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("api", {
   onEvent: (cb: (ev: AgentEvent) => void) => ipcRenderer.on("agent-event", (_e, ev) => cb(ev)),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("pick-directory"),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke("pick-files"),
+  pickImages: (): Promise<{ name: string; data_url: string }[]> => ipcRenderer.invoke("pick-images"),
   readFile: (p: string): Promise<{ content?: string; error?: string }> => ipcRenderer.invoke("read-file", p),
   getLastProject: (): Promise<string | null> => ipcRenderer.invoke("last-project"),
   setLastProject: (p: string): Promise<void> => ipcRenderer.invoke("set-last-project", p),

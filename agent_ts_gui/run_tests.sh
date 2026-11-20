@@ -12,6 +12,9 @@
 set -u
 cd "$(dirname "$0")"
 
+# the CDP tests default to this repo as the project under test
+export TEST_ROOT="${TEST_ROOT:-$PWD}"
+
 target="${1:-all}"
 failed=()
 
@@ -33,7 +36,7 @@ run_gui() { # $1 = cdp test file name (without .cjs)
 case "$target" in
   backend) run_backend ;;
   gui)
-    for t in boot theme split proj proj_switch ctxmenu files local_add localpick restart_close debug; do
+    for t in boot theme split proj proj_switch ctxmenu files local_add localpick restart_close debug image; do
       run_gui "$t"
     done
     ;;
@@ -43,7 +46,7 @@ case "$target" in
     ;;
   all)
     run_backend
-    for t in boot theme split proj proj_switch ctxmenu files local_add localpick restart_close debug; do
+    for t in boot theme split proj proj_switch ctxmenu files local_add localpick restart_close debug image; do
       run_gui "$t"
     done
     ;;

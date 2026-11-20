@@ -21,7 +21,13 @@ def estimate_message(msg: dict) -> int:
     if isinstance(content, str):
         n += estimate_text(content)
     elif isinstance(content, list):
-        n += sum(estimate_text(p.get("text", "")) for p in content if isinstance(p, dict))
+        for p in content:
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") == "image_url":
+                n += 1200  # rough per-image cost for common vision models
+            else:
+                n += estimate_text(p.get("text", ""))
     for tc in msg.get("tool_calls") or []:
         fn = tc.get("function", {})
         n += estimate_text(fn.get("name", "")) + estimate_text(fn.get("arguments", "")) + 4
