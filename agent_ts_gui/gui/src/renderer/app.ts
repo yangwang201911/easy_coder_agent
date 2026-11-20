@@ -1,5 +1,29 @@
 // Coder Agent GUI - main window: layout, RPC client, live event rendering.
+import markdownit from "markdown-it";
+import DOMPurify from "dompurify";
 import type { AgentEvent, ReplyMsg } from "../types";
+
+// ------------------------------------------------------ markdown (chat only)
+const md = markdownit({ html: false, linkify: true, breaks: true });
+function renderMarkdown(el: HTMLElement, text: string) {
+  el.innerHTML = DOMPurify.sanitize(md.render(text));
+  // add a copy button to every code block
+  for (const pre of Array.from(el.querySelectorAll("pre"))) {
+    const wrap = document.createElement("div");
+    wrap.className = "md-code";
+    pre.parentNode!.insertBefore(wrap, pre);
+    const btn = document.createElement("button");
+    btn.className = "copy-btn";
+    btn.textContent = "copy";
+    btn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(pre.textContent ?? ""); } catch { /* clipboard unavailable */ }
+      btn.textContent = "copied!";
+      setTimeout(() => { btn.textContent = "copy"; }, 1200);
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(pre);
+  }
+}
 
 // ------------------------------------------------------------------ helpers
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -61,6 +85,37 @@ class Pane {
   }
 }
 
+// streaming markdown block: keeps the raw text, re-renders the whole block
+// (throttled to one frame) so partial code fences self-correct as deltas arrive
+class MdBlock {
+  el: HTMLElement;
+  text = "";
+  private dirty = false;
+  private done = false;
+  constructor(parent: HTMLElement, text = "") {
+    this.el = document.createElement("div");
+    this.el.className = "md";
+    parent.appendChild(this.el);
+    this.text = text;
+    this.renderNow();
+  }
+  append(t: string) {
+    if (this.done) return;
+    this.text += t;
+    if (!this.dirty) {
+      this.dirty = true;
+      requestAnimationFrame(() => { this.dirty = false; if (!this.done) this.renderNow(); });
+    }
+  }
+  finish() { this.done = true; this.renderNow(); }
+  private renderNow() {
+    const pane = this.el.parentElement!;
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 8;
+    renderMarkdown(this.el, this.text);
+    if (atBottom) pane.scrollTop = pane.scrollHeight;
+  }
+}
+
 const chat = new Pane($("chat"));
 const activity = new Pane($("tab-activity"));
 const thinking = new Pane($("tab-thinking"));
@@ -86,6 +141,9 @@ const S = {
   thinkChars: 0,
   block: null as string | null,
   blockFirst: false,
+  mdBlock: null as MdBlock | null,
+  curTurnId: null as string | null,
+  curTurnBlocks: [] as MdBlock[],
   pendingDocs: new Map<string, string>(),
   planDict: null as Record<string, any> | null,
 };
@@ -212,10 +270,10 @@ async function refreshServerInfo() {
 // ------------------------------------------------------------------ toolbar
 function setBusy(busy: boolean) {
   S.busy = busy;
-  ($("send-btn") as HTMLButtonElement).disabled = busy;
-  ($("resend-btn") as HTMLButtonElement).disabled = busy;
   ($("stop-btn") as HTMLButtonElement).disabled = !busy;
-  ($("input") as HTMLTextAreaElement).readOnly = busy;
+  const sb = $("send-btn") as HTMLButtonElement;
+  sb.textContent = busy ? "Stop" : "Send";
+  sb.title = busy ? "Stop the current run" : "Send (Enter)";
 }
 
 function reloadTaskTypes() {
@@ -284,6 +342,8 @@ function resetViews() {
   S.planDict = null;
   S.pendingDocs.clear();
   S.block = null;
+  S.mdBlock = null;
+  S.curTurnBlocks = [];
   S.thinkChars = 0;
   $("llm-label").textContent = "";
   setState("idle", "");
@@ -292,6 +352,8 @@ function resetViews() {
 // ------------------------------------------------------- chat rendering
 function chatTool(name: string, args: Record<string, any>, agent = "main") {
   const who = agent === "main" ? "" : `[${agent}] `;
+  S.mdBlock?.finish();
+  S.mdBlock = null;
   chat.line(`\n> ${who}${name}  ${short(argsSummary(name, args), 160)}`, "c-tool", true);
   S.block = null;
 }
@@ -300,14 +362,36 @@ function chatResult(ok: boolean, text: string) {
   chat.line("  " + short(text, 300), ok ? "c-muted" : "c-error", true);
 }
 
-function renderTurn(t: { prompt: string; task_type: string; messages: any[]; status: string; created?: number }) {
+// action row shown after a finished turn: re-send this turn / copy its answer
+function turnActionBar(turnId: string, blocks: MdBlock[]) {
+  const row = document.createElement("div");
+  row.className = "turn-actions";
+  const mk = (label: string, title: string, fn: () => void) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.title = title;
+    b.addEventListener("click", fn);
+    row.appendChild(b);
+  };
+  mk("↻", "Re-send this prompt (rewinds to it first)", () => void resendTurn(turnId));
+  mk("⧉", "Copy this turn's answer", async () => {
+    const text = blocks.map((b) => b.text).filter(Boolean).join("\n\n");
+    try { await navigator.clipboard.writeText(text); } catch { /* clipboard unavailable */ }
+  });
+  chat.el.appendChild(row);
+}
+
+function renderTurn(t: { prompt: string; task_type: string; messages: any[]; status: string; created?: number; id?: string }) {
   chat.line(`\nYou  [${t.task_type}]${t.created ? "  " + stampOf(t.created) : ""}`, "c-user");
   chat.line(t.prompt);
+  const blocks: MdBlock[] = [];
   for (const m of t.messages) {
     if (m.role === "assistant") {
       if (m.content) {
         chat.line("\nAssistant", "c-ok b");
-        chat.line(String(m.content).replace(/^\n+/, ""));
+        const b = new MdBlock(chat.el, String(m.content).replace(/^\n+/, ""));
+        b.finish();
+        blocks.push(b);
       }
       for (const tc of m.tool_calls ?? []) {
         let args: any = {};
@@ -319,7 +403,7 @@ function renderTurn(t: { prompt: string; task_type: string; messages: any[]; sta
       chatResult(!c.startsWith("ERROR") && !c.startsWith("DENIED") && !c.startsWith("REJECTED"), c);
     }
   }
-  chat.line(`-- ${t.status} --`, "c-muted");
+  if (t.id && blocks.length) turnActionBar(t.id, blocks);
 }
 
 async function replaySession() {
@@ -1430,15 +1514,16 @@ function send() {
   }
 }
 
-// Re-send the last prompt: rewind to it (discarding it and later turns),
+// Re-send a turn's prompt: rewind to it (discarding it and later turns),
 // then submit the same prompt again.
-async function resend() {
+async function resendTurn(turnId: string) {
   if (S.busy || !S.root) return;
   const turns = await call("session_turns");
   if (turns && turns.__error) { chat.line(`\n[error] ${turns.__error}`, "c-error"); return; }
   const active = (turns.turns ?? []).filter((t: any) => t.active);
   const last = active[active.length - 1];
   if (!last) { chat.line("\n[nothing to re-send: no turns yet]", "c-warn"); return; }
+  if (last.id !== turnId) { chat.line("\n[can only re-send the latest turn]", "c-warn"); return; }
   const info = await impactText(last.id);
   if (info.startsWith("RuntimeError") || info.startsWith("turn not on")) { chat.line(`\n[error] ${info}`, "c-error"); return; }
   const ok = await confirmModal("Re-send last prompt", `Rewind to the last prompt and send it again:\n\n"${last.prompt}"\n\n${info}\n\nContinue?`);
@@ -1474,6 +1559,8 @@ function onEvent(ev: AgentEvent) {
   const d = ev.data;
   if (k === "turn_started") {
     S.block = null;
+    S.curTurnId = d.turn_id ?? null;
+    S.curTurnBlocks = [];
     thinking.clear();
     S.thinkChars = 0;
     chat.line(`\nYou  [${d.task_type}]  ${stampOf(ev.ts)}`, "c-user");
@@ -1493,8 +1580,10 @@ function onEvent(ev: AgentEvent) {
     }
     // the header line already ends with a newline; drop the leading newlines
     // of the first content chunk so there is no double blank line
-    chat.write(S.blockFirst ? (d.text ?? "").replace(/^\n+/, "") : d.text);
+    const t = S.blockFirst ? (d.text ?? "").replace(/^\n+/, "") : (d.text ?? "");
     S.blockFirst = false;
+    if (!S.mdBlock) { S.mdBlock = new MdBlock(chat.el); S.curTurnBlocks.push(S.mdBlock); }
+    S.mdBlock.append(t);
   } else if (k === "tool_call") {
     chatTool(d.name, d.args ?? {}, ev.agent_id);
     log(ev, `${d.name} ${argsSummary(d.name, d.args ?? {})}`, "c-tool");
@@ -1540,7 +1629,12 @@ function onEvent(ev: AgentEvent) {
     chat.line(`\n[${k}] ${d.text ?? ""}`, k === "error" ? "c-error" : "c-warn");
     log(ev, d.text ?? "", k === "error" ? "c-error" : "c-warn");
   } else if (k === "turn_finished") {
-    chat.line(`\n-- ${d.status} --`, "c-muted");
+    S.mdBlock?.finish();
+    S.mdBlock = null;
+    if (d.status !== "ok") chat.line(`\n-- ${d.status} --`, "c-muted");
+    if (S.curTurnId && S.curTurnBlocks.length) turnActionBar(S.curTurnId, S.curTurnBlocks);
+    S.curTurnId = null;
+    S.curTurnBlocks = [];
     log(ev, d.status);
     setBusy(false);
     setState("idle", "");
@@ -1749,12 +1843,16 @@ inputEl.addEventListener("drop", async (e) => {
 });
 
 // ------------------------------------------------------------------ wiring
-$("send-btn").addEventListener("click", send);
-$("resend-btn").addEventListener("click", resend);
+$("send-btn").addEventListener("click", () => {
+  if (S.busy) {
+    call("cancel");
+    chat.line("\n[stopping...]", "c-warn");
+  } else {
+    send();
+  }
+});
 $("input").addEventListener("keydown", (e) => {
-  // ignore Enter while an IME (e.g. Chinese pinyin) composition is in progress
-  if (e.isComposing || e.keyCode === 229) return;
-  if (e.key === "Enter" && e.ctrlKey) {
+  if (e.code === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     const s = inputEl.selectionStart ?? inputEl.value.length;
     const n = inputEl.selectionEnd ?? s;
@@ -1762,7 +1860,9 @@ $("input").addEventListener("keydown", (e) => {
     inputEl.selectionStart = inputEl.selectionEnd = s + 1;
     return;
   }
-  if (e.key === "Enter") { e.preventDefault(); send(); }
+  // ignore Enter while an IME (e.g. Chinese pinyin) composition is in progress
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.code === "Enter") { e.preventDefault(); send(); }
 });
 $("stop-btn").addEventListener("click", () => {
   call("cancel");
