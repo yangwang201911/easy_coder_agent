@@ -1754,7 +1754,15 @@ $("resend-btn").addEventListener("click", resend);
 $("input").addEventListener("keydown", (e) => {
   // ignore Enter while an IME (e.g. Chinese pinyin) composition is in progress
   if (e.isComposing || e.keyCode === 229) return;
-  if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && e.ctrlKey) {
+    e.preventDefault();
+    const s = inputEl.selectionStart ?? inputEl.value.length;
+    const n = inputEl.selectionEnd ?? s;
+    inputEl.value = inputEl.value.slice(0, s) + "\n" + inputEl.value.slice(n);
+    inputEl.selectionStart = inputEl.selectionEnd = s + 1;
+    return;
+  }
+  if (e.key === "Enter") { e.preventDefault(); send(); }
 });
 $("stop-btn").addEventListener("click", () => {
   call("cancel");
