@@ -295,6 +295,9 @@ body.resizing-h * { cursor: row-resize !important; }
 }
 #chat-view-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 #session-chat-view #chat { flex: 1; min-height: 0; }
+/* the input box is a direct child of the sessions tab, so it stays visible
+   in both the list view and the chat view */
+#tab-sessions > #input-resize, #tab-sessions > #input-zone { flex: none; }
 
 /* lists */
 .list { list-style: none; margin: 0; padding: 0; }
@@ -340,26 +343,151 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 #term-pane .xterm { position: absolute; inset: 4px; }
 #term-pane .xterm .xterm-viewport { overflow-anchor: auto; }
 
-/* --------------------------------------------------------------- chat */
+/* --------------------------------------------------------------- chat
+   Claude-Code style: the pane is a flat dark area; the user prompt sits in a
+   rounded card; the agent's tool activity is collapsed behind a "Completed
+   N steps in Xs" chip; the final answer is plain markdown. */
 #chat {
   flex: 1;
   overflow-y: auto;
-  background: var(--panel);
+  background: var(--bg);
   border: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 12px 14px;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.45;
+  line-height: 1.5;
 }
+/* user prompt: rounded card, slightly lighter than the pane background */
+#chat .user-card {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--row-border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin: 4px 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#chat .user-card .uc-head {
+  font-size: 11px;
+  color: var(--text-soft2);
+  margin-bottom: 4px;
+  font-weight: normal;
+}
+/* "Completed 7 steps in 23s" chip above the final answer */
+#chat .steps-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 3px 12px;
+  margin: 2px 0 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#chat .steps-chip:hover { background: var(--hover); color: var(--text); }
+#chat .steps-chip .chip-arrow { font-size: 10px; color: var(--text-faint); }
+/* the collapsed tool activity hidden behind the chip */
+#chat .steps-body { display: none; margin: 0 0 10px; }
+#chat .steps-body.open { display: block; }
+/* turn separator + action row */
+#chat .turn-actions { display: flex; gap: 6px; margin: 4px 0 14px; }
+#chat .turn-actions button {
+  font-size: 12px; line-height: 1; padding: 3px 9px;
+  color: var(--text-soft); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
+}
+#chat .turn-actions button:hover { background: var(--hover); color: var(--text); }
+
+/* ------------------------------------------------- input box (Claude style)
+   A single rounded card: textarea on top, a slim toolbar inside at the
+   bottom (attach / mode / model ... send arrow), and a status row
+   (connection / permissions) under the card. */
 #input-zone {
   flex: none;
-  height: 110px;
-  min-height: 70px;
+  height: 130px;
+  min-height: 90px;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border);
-  padding: 6px 8px 8px;
+  padding: 8px 10px 8px;
 }
+#input-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  overflow: hidden;
+}
+#input-card:focus-within { border-color: var(--focus); }
+#input {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 10px 12px 4px;
+  box-shadow: none;
+}
+#input:focus { outline: none; box-shadow: none; }
+#send-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 6px;
+}
+/* compact icon buttons in the card toolbar */
+#send-row button {
+  font-size: 12px;
+  padding: 3px 8px;
+  line-height: 1.3;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+#send-row button:hover { background: var(--hover-strong); color: var(--text); }
+#send-row button svg { display: block; }
+#model-combo { font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the send arrow: filled circle when active, gray when disabled */
+#send-btn { width: 28px; height: 28px; padding: 0; justify-content: center; }
+#send-btn:not(:disabled) { background: var(--text); color: var(--bg); }
+#send-btn:not(:disabled):hover { background: var(--text); color: var(--bg); opacity: 0.85; }
+#send-btn:disabled { background: var(--badge-bg); color: var(--text-faint); }
+/* status row under the card: connection mode + approval policy */
+#input-foot-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 4px 0;
+}
+#input-foot-row button {
+  font-size: 11px;
+  padding: 2px 6px;
+  line-height: 1.3;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+#input-foot-row button:hover { background: var(--hover); color: var(--text); }
+#input-foot-row button svg { display: block; }
 /* drag handle above the input box: pull up to enlarge it */
 #input-resize {
   flex: none;
@@ -369,15 +497,19 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
   background: transparent;
 }
 #input-resize:hover, #input-resize.dragging { background: var(--splitter-hover); }
-#input {
-  flex: 1;
-  min-height: 0;
-  resize: none;
-  padding: 8px;
+#file-attach-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 4px 8px 0; padding: 2px 8px;
+  font-size: 11px; line-height: 1.4;
+  color: var(--text-soft); background: var(--panel);
+  border: 1px dashed var(--border); border-radius: 10px;
+  cursor: pointer; user-select: none; max-width: calc(100% - 16px);
 }
-#send-row { display: flex; justify-content: flex-end; padding-top: 4px; gap: 6px; }
-/* compact buttons in the send row */
-#send-row button { font-size: 11px; padding: 2px 8px; line-height: 1.3; }
+#file-attach-tag:hover { color: var(--text); border-color: var(--text-soft); }
+#file-attach-tag .fatag-icon { font-weight: bold; }
+#file-attach-tag.attached {
+  color: var(--text); background: var(--hover); border-style: solid;
+}
 #attach-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 0; }
 .attach-item { position: relative; }
 .attach-item img {
@@ -392,17 +524,25 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 }
 .flex1 { flex: 1; }
 
-/* action row after a finished turn: re-send / copy answer */
-#chat .turn-actions { display: flex; gap: 6px; margin: 6px 0 10px; }
-#chat .turn-actions button {
-  font-size: 12px; line-height: 1; padding: 3px 9px;
-  color: var(--text-soft); background: var(--panel);
-  border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
-}
-#chat .turn-actions button:hover { background: var(--hover); color: var(--text); }
-
 /* rendered markdown in the chat pane */
 #chat .md { white-space: normal; margin: 4px 0 8px; }
+/* collapsible tool / result lines: one line until clicked, click again to collapse */
+#chat .collapsible {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  cursor: pointer;
+}
+#chat .collapsible:hover { background: var(--hover); }
+#chat .collapsible.expanded {
+  display: inline;
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+}
 #chat .md > :first-child { margin-top: 0; }
 #chat .md > :last-child { margin-bottom: 0; }
 #chat .md h1, #chat .md h2, #chat .md h3, #chat .md h4 {
@@ -474,29 +614,39 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 
 /* ------------------------------------------------- file viewer (mid pane) */
 #file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-#diff-toolbar {
-  display: flex; align-items: center; gap: 10px; flex: none;
-  padding: 4px 8px; border-bottom: 1px solid var(--row-border);
-  font-size: 12px;
+#file-tabs {
+  display: flex; align-items: stretch; flex-wrap: wrap; flex: none;
+  border-bottom: 1px solid var(--row-border);
+  background: var(--panel);
 }
-#diff-toolbar label { display: flex; align-items: center; gap: 4px; }
-#diff-toolbar select { max-width: 320px; }
-#diff-file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#diff-toggle-btn.diff-on { background: var(--fill); font-weight: bold; }
-#diff-body { flex: 1; min-height: 0; overflow: auto; background: var(--code-bg); padding: 4px 0; font-size: 12px; }
-.dline { display: flex; line-height: 1.45; }
-.dline .dno {
+.ftab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-right: 1px solid var(--row-border);
+  cursor: pointer; font-size: 12px;
+  white-space: nowrap; max-width: 220px;
+  color: var(--text-soft);
+}
+.ftab:hover { background: var(--hover); }
+.ftab.active { background: var(--code-bg); color: var(--text); }
+.ftab .fname { overflow: hidden; text-overflow: ellipsis; }
+.ftab .fdot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--add);
+}
+.ftab .fclose {
+  flex: none; border: none; background: none; cursor: pointer;
+  color: var(--text-faint); font-size: 12px; line-height: 1;
+  padding: 0 2px;
+}
+.ftab .fclose:hover { color: var(--text); }
+#file-body { flex: 1; min-height: 0; overflow: auto; background: var(--code-bg); padding: 4px 0; font-size: 12px; }
+.fline { display: flex; line-height: 1.45; }
+.fline .fno {
   flex: none; width: 44px; text-align: right; padding-right: 8px;
   color: var(--text-faint); user-select: none; border-right: 1px solid var(--row-border);
 }
-.dline .dtext { white-space: pre; padding-left: 8px; }
-.dline.same .dtext { color: var(--text-soft); }
-.dline.add { background: var(--msg-ok-bg); }
-.dline.add .dtext { color: var(--add); }
-.dline.del { background: var(--msg-err-bg); }
-.dline.del .dtext { color: var(--del); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--del) 50%, transparent); }
-.diff-note { padding: 6px 10px; color: var(--text-soft2); font-size: 11px; border-bottom: 1px solid var(--row-border); }
-.dplain { margin: 0; padding: 8px 10px; white-space: pre; font-size: 12px; line-height: 1.45; }
+.fline .ftext { white-space: pre; padding-left: 8px; }
 
 /* spans */
 .c-user { color: var(--user); font-weight: bold; }
@@ -510,6 +660,13 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 .c-hunk { color: var(--hunk); }
 .b { font-weight: bold; }
 .m { font-family: "Noto Sans Mono CJK SC", "DejaVu Sans Mono", monospace; }
+/* clickable file name in the chat output: opens the file in the file viewer */
+.file-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.file-link:hover { color: var(--accent-hover); }
 
 /* ---------------------------------------------------------- status bar */
 #statusbar {

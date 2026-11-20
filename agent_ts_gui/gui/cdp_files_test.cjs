@@ -1,4 +1,4 @@
-// Smoke test for the Files tree + Diff view (left "Files" tab, mid Chat/Diff tabs).
+// Smoke test for the Files tree + tabbed file viewer (left "Files" tab, mid file tabs).
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 const fs = require("fs");
 const os = require("os");
@@ -111,48 +111,76 @@ const check = (name, ok, extra = "") => {
   }
   check("collapsing/expanding src keeps working", fileRow);
 
-  // 4) click the unchanged file -> mid shows its content, diff toggle grayed out
+  // 4) click the unchanged file -> a tab opens and the mid pane shows its content
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('hello.txt')).click()`);
-  let diffText = "";
+  let bodyText = "";
   for (let i = 0; i < 20; i++) {
-    diffText = await evalJs(`document.getElementById('diff-body').textContent`) ?? "";
-    if (!diffText.includes("loading...") && diffText.includes("line2")) break;
+    bodyText = await evalJs(`document.getElementById('file-body').textContent`) ?? "";
+    if (!bodyText.includes("loading...") && bodyText.includes("line2")) break;
     await wait(300);
   }
-  check("mid shows file content", diffText.includes("line2"), diffText.slice(0, 80));
-  check("diff toggle disabled for unchanged file", (await evalJs(`document.getElementById('diff-toggle-btn').disabled`)) === true);
-  check("diff turn select lists the seeded turn", !!(await evalJs(`document.getElementById('diff-turn-select').textContent.includes('seed turn')`)));
+  check("mid shows file content", bodyText.includes("line2"), bodyText.slice(0, 80));
+  check("tab bar has one tab", (await evalJs(`document.querySelectorAll('#file-tabs .ftab').length`)) === 1);
+  check("tab is active and named", !!(await evalJs(`(() => {
+      const t = document.querySelector('#file-tabs .ftab');
+      return t && t.classList.contains('active') && t.querySelector('.fname').textContent === 'hello.txt';
+    })()`)));
 
-  // 4b) click the changed file -> real diff with deleted + added lines
+  // 4b) click the changed file -> second tab, both tabs present, content switched
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('mod.txt')).click()`);
-  let diffOk = false;
+  let modOk = false;
   for (let i = 0; i < 20; i++) {
-    diffOk = !!(await evalJs(`(() => {
-      const body = document.getElementById('diff-body');
-      return body.querySelector('.dline.del') && body.querySelector('.dline.add')
-        && body.querySelector('.dline.del .dtext').textContent === 'old line'
-        && body.querySelector('.dline.add .dtext').textContent === 'changed line';
+    modOk = !!(await evalJs(`(() => {
+      const body = document.getElementById('file-body');
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      return body.textContent.includes('changed line') && tabs.length === 2
+        && tabs[1].classList.contains('active');
     })()`));
-    if (diffOk) break;
+    if (modOk) break;
     await wait(300);
   }
-  check("changed file shows del/add diff lines", diffOk);
-  if (!diffOk) console.log("backend:", backendLog().slice(-1500));
+  check("second tab opens with its content", modOk);
+  check("changed tab shows modified dot", !!(await evalJs(`(() => {
+      const t = Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'mod.txt');
+      return t && t.querySelector('.fdot');
+    })()`)));
+  check("unchanged tab has no dot", !!(await evalJs(`(() => {
+      const t = Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt');
+      return t && !t.querySelector('.fdot');
+    })()`)));
 
-  // 5) diff toggle: switch back to plain view and to diff view
-  await evalJs(`document.getElementById('diff-toggle-btn').click()`);
+  // 5) click the first tab -> switches back to hello.txt content
+  await evalJs(`Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt').click()`);
   await wait(200);
-  check("toggle back to plain view", !!(await evalJs(`document.getElementById('diff-body').querySelector('.dplain')`)));
-  check("toggle off removes diff lines", !!(await evalJs(`!document.getElementById('diff-body').querySelector('.dline')`)));
-  await evalJs(`document.getElementById('diff-toggle-btn').click()`);
-  await wait(200);
-  let diffBack = false;
+  let switched = false;
   for (let i = 0; i < 20; i++) {
-    diffBack = !!(await evalJs(`document.getElementById('diff-body').querySelector('.dline.add')`));
-    if (diffBack) break;
+    switched = !!(await evalJs(`(() => {
+      const body = document.getElementById('file-body');
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      return body.textContent.includes('line2') && !body.textContent.includes('changed line')
+        && tabs[0].classList.contains('active') && !tabs[1].classList.contains('active');
+    })()`));
+    if (switched) break;
     await wait(300);
   }
-  check("toggle back to diff works", diffBack);
+  check("clicking a tab switches the view", switched);
+
+  // 5b) close the active tab -> the other tab becomes active
+  await evalJs(`Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt').querySelector('.fclose').click()`);
+  await wait(200);
+  let closed = false;
+  for (let i = 0; i < 20; i++) {
+    closed = !!(await evalJs(`(() => {
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      const body = document.getElementById('file-body');
+      return tabs.length === 1 && tabs[0].classList.contains('active')
+        && tabs[0].querySelector('.fname').textContent === 'mod.txt'
+        && body.textContent.includes('changed line');
+    })()`));
+    if (closed) break;
+    await wait(300);
+  }
+  check("close button removes the tab and switches to the remaining one", closed);
 
   // 6) tree refresh button does not break
   await evalJs(`document.getElementById('tree-refresh-btn').click()`);

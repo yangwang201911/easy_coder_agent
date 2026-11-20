@@ -74,7 +74,7 @@ class Pane {
   el: HTMLElement;
   constructor(el: HTMLElement) { this.el = el; }
   clear() { this.el.textContent = ""; }
-  write(text: string, cls = "", mono = false) {
+  write(text: string, cls = "", mono = false): HTMLElement {
     const atBottom = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 8;
     const span = document.createElement("span");
     if (cls) span.className = cls;
@@ -82,10 +82,24 @@ class Pane {
     span.textContent = text;
     this.el.appendChild(span);
     if (atBottom) this.el.scrollTop = this.el.scrollHeight;
+    return span;
   }
-  line(text = "", cls = "", mono = false) {
-    this.write(text + "\n", cls, mono);
+  line(text = "", cls = "", mono = false): HTMLElement {
+    return this.write(text + "\n", cls, mono);
   }
+}
+
+// ------------------------------------------------- collapsible tool output
+// Tool lines in the chat are collapsed to a single line by default; clicking
+// the line expands it (multi-line commands / long results) and clicking it
+// again collapses it back.
+function toggleBlock(span: HTMLElement, full: string, clsName: string) {
+  if (span.dataset.full === undefined) { span.dataset.full = full; span.dataset.cls = clsName; }
+  const expanded = span.classList.toggle("expanded");
+  span.textContent = expanded ? span.dataset.full : short(span.dataset.full, 160);
+  span.classList.toggle("c-muted", !expanded && span.dataset.cls !== "c-error");
+  const saved = span.dataset.cls;
+  if (saved) span.classList.toggle(saved, expanded);
 }
 
 // streaming markdown block: keeps the raw text, re-renders the whole block
@@ -112,10 +126,9 @@ class MdBlock {
   }
   finish() { this.done = true; this.renderNow(); }
   private renderNow() {
-    const pane = this.el.parentElement!;
-    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 8;
+    const atBottom = chat.el.scrollHeight - chat.el.scrollTop - chat.el.clientHeight < 8;
     renderMarkdown(this.el, this.text);
-    if (atBottom) pane.scrollTop = pane.scrollHeight;
+    if (atBottom) chat.el.scrollTop = chat.el.scrollHeight;
   }
 }
 
@@ -147,8 +160,15 @@ const S = {
   mdBlock: null as MdBlock | null,
   curTurnId: null as string | null,
   curTurnBlocks: [] as MdBlock[],
+  curTaskType: null as string | null, // task type chosen in the input toolbar (null = auto)
+  stepsBody: null as HTMLElement | null, // the collapsed tool activity of the running turn
+  stepsCount: 0,
+  turnStart: 0,
+  approvalPolicy: null as string | null, // user approval policy text (for the input footer chip)
   attachments: [] as { name: string; data_url: string }[],
+  fileAttached: null as string | null,
   pendingDocs: new Map<string, string>(),
+  toolPaths: new Map<string, string>(), // tool_call id -> file path (for clickable results)
   planDict: null as Record<string, any> | null,
 };
 
@@ -276,15 +296,51 @@ function setBusy(busy: boolean) {
   S.busy = busy;
   ($("stop-btn") as HTMLButtonElement).disabled = !busy;
   const sb = $("send-btn") as HTMLButtonElement;
-  sb.textContent = busy ? "Stop" : "Send";
-  sb.title = busy ? "Stop the current run" : "Send (Enter)";
+  // only one session may be in conversation at a time: while the current one
+  // is running the send button is grayed out and unavailable until it finishes
+  // (stopping the running session is the toolbar Stop button)
+  sb.textContent = "Send";
+  sb.disabled = busy;
+  sb.title = busy ? "A session is in conversation; sending is disabled until it finishes" : "Send (Enter)";
 }
 
+// the task type is chosen in the input toolbar's ＋ menu (not a toolbar select)
 function reloadTaskTypes() {
-  const sel = $("task-combo") as HTMLSelectElement;
-  const cur = sel.value;
-  sel.innerHTML = "<option>(auto)</option>" + S.taskTypes.map((n) => `<option>${n}</option>`).join("");
-  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  if (S.curTaskType && !S.taskTypes.includes(S.curTaskType)) S.curTaskType = null;
+}
+
+// model chip in the input toolbar: "model · context" (click -> Settings)
+function refreshModelLabel() {
+  const model = S.config?.server?.model ?? "";
+  const el = $("model-combo");
+  el.textContent = model ? `${model} · ${fmtTok(S.ctxMax)}` : "model · ?";
+  el.title = model
+    ? `Model: ${model}\nContext: ${fmtTok(S.ctxMax)} tokens\nClick to open Settings > Model`
+    : "No model configured (Settings > Model)";
+}
+
+// connection chip under the input card: "Local" / "Remote host:port"
+async function refreshConnLabel() {
+  const mode = await window.api.getConnMode().catch(() => "local");
+  const text = $("conn-mode-text");
+  const btn = $("conn-mode-label");
+  if (mode === "remote") {
+    const c = await window.api.getConnection().catch(() => null);
+    text.textContent = c ? `Remote ${c.host}:${c.port}` : "Remote";
+    btn.title = `Connected to remote agent server ${c ? c.host + ":" + c.port : ""}\nClick to change the connection (Settings > Remote server)`;
+  } else {
+    text.textContent = "Local";
+    btn.title = "Agent runs on this machine (local mode). Click for Settings > Remote server";
+  }
+}
+
+// approval chip under the input card: "Default permissions" / "Auto-approve"
+function refreshApprovalLabel() {
+  const text = $("approval-text");
+  const btn = $("approval-label");
+  const auto = /auto_approve_all\s*=\s*true/.test(S.approvalPolicy ?? "");
+  text.textContent = auto ? "Auto-approve" : "Default permissions";
+  btn.title = `Approval policy: ${auto ? "auto_approve_all = true" : "ask before running commands / writing files"}\nClick to open Settings > Approval`;
 }
 
 function savedProjectFor(root: string): SavedProject | null {
@@ -326,22 +382,19 @@ async function openProject(root: string, sessionId: string | null = null) {
   // the project lives on the server machine (remembered by name in localStorage)
   window.api.getConnMode().then((m) => { if (m === "local") window.api.setLastProject(r.root); }).catch(() => {});
   reloadTaskTypes();
+  refreshModelLabel();
+  void (async () => {
+    const r = await call("approval_policy");
+    if (r && !r.__error) { S.approvalPolicy = r.text; refreshApprovalLabel(); }
+  })();
   resetViews();
   await replaySession();
   await refreshTurnList();
   await refreshSessionList();
   refreshContextEstimate();
   refreshServerInfo();
-  S_DIFF.selectedFile = null;
-  S_DIFF.selectedTurn = null;
-  S_DIFF.showDiff = false;
-  S_DIFF.currentContent = null;
-  $("diff-file-label").textContent = "no file open";
-  $("diff-file-label").classList.add("muted");
-  $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
-  updateDiffToggle();
+  clearFileView();
   void refreshFileTree();
-  void refreshDiffTurns();
   // open the current session's chat view
   const cur = await call("session_summaries");
   const title = cur && !cur.__error
@@ -358,22 +411,124 @@ function resetViews() {
   S.block = null;
   S.mdBlock = null;
   S.curTurnBlocks = [];
+  S.stepsBody = null;
+  S.stepsCount = 0;
   S.thinkChars = 0;
   $("llm-label").textContent = "";
   setState("idle", "");
 }
 
 // ------------------------------------------------------- chat rendering
+// clickable file name: opens the file in the main file viewer
+function fileLinkEl(path: string): HTMLElement {
+  const a = document.createElement("span");
+  a.className = "file-link";
+  a.textContent = path;
+  a.title = "Open in file viewer";
+  a.addEventListener("click", (e) => { e.stopPropagation(); openFile(path, false); });
+  return a;
+}
+
+// the tool activity of the current turn: while a turn runs the lines are
+// visible; at turn_finished they collapse behind the "Completed N steps" chip
+function stepsPane(): HTMLElement { return S.stepsBody ?? chat.el; }
+
 function chatTool(name: string, args: Record<string, any>, agent = "main") {
   const who = agent === "main" ? "" : `[${agent}] `;
   S.mdBlock?.finish();
   S.mdBlock = null;
-  chat.line(`\n> ${who}${name}  ${short(argsSummary(name, args), 160)}`, "c-tool", true);
+  const full = `> ${who}${name}  ${argsSummary(name, args)}`;
+  const pane = stepsPane();
+  const pwrite = (t: string, cls = "") => {
+    const s = document.createElement("span");
+    if (cls) s.className = cls;
+    s.textContent = t;
+    pane.appendChild(s);
+    return s;
+  };
+  pwrite("\n", "c-tool m");
+  const body = pwrite("", "c-tool m");
+  body.appendChild(document.createTextNode(`> ${who}${name}  `));
+  const p = String(args.path ?? "");
+  if (p) {
+    // file tools: the path is a clickable tag (no collapse, it would destroy the link)
+    body.appendChild(fileLinkEl(p));
+    if (name === "read_file" && args.start_line) {
+      body.appendChild(document.createTextNode(` [${args.start_line}-${args.end_line ?? ""}]`));
+    }
+  } else {
+    body.appendChild(document.createTextNode(argsSummary(name, args)));
+    body.classList.add("collapsible");
+    body.addEventListener("click", () => toggleBlock(body, full, "c-tool m"));
+  }
+  pwrite("\n", "c-tool m");
   S.block = null;
 }
 
-function chatResult(ok: boolean, text: string) {
-  chat.line("  " + short(text, 300), ok ? "c-muted" : "c-error", true);
+function chatResult(ok: boolean, text: string, toolName = "", path = "") {
+  if (ok && path && (toolName === "write_file" || toolName === "apply_patch")) {
+    // file written/patched: show only the clickable file name, not the content/diff
+    const cls = "c-muted m";
+    const pane = stepsPane();
+    const s = document.createElement("span");
+    s.className = cls;
+    s.textContent = "\n  ";
+    pane.appendChild(s);
+    const link = fileLinkEl(path);
+    pane.appendChild(link);
+    pane.appendChild(document.createTextNode("\n"));
+    return;
+  }
+  const full = "  " + text;
+  const cls = (ok ? "c-muted" : "c-error") + " m";
+  const pane = stepsPane();
+  const body = document.createElement("span");
+  body.className = cls;
+  body.textContent = short(full, 300);
+  body.classList.add("collapsible");
+  body.addEventListener("click", () => toggleBlock(body, full, cls));
+  pane.appendChild(body);
+  pane.appendChild(document.createTextNode("\n"));
+}
+
+// user prompt as a rounded card (Claude-Code style)
+function userPromptCard(prompt: string, head = ""): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "user-card";
+  if (head) {
+    const h = document.createElement("span");
+    h.className = "uc-head";
+    h.textContent = head;
+    card.appendChild(h);
+  }
+  card.appendChild(document.createTextNode(prompt));
+  chat.el.appendChild(card);
+  return card;
+}
+
+// "Completed N steps in Xs" chip + the collapsible tool activity it hides
+function stepsChipEl(): HTMLElement {
+  const chip = document.createElement("span");
+  chip.className = "steps-chip";
+  chip.innerHTML = `<span class="chip-label"></span><span class="chip-arrow">▸</span>`;
+  const body = document.createElement("div");
+  body.className = "steps-body";
+  chip.addEventListener("click", () => {
+    const open = body.classList.toggle("open");
+    chip.querySelector(".chip-arrow")!.textContent = open ? "▾" : "▸";
+  });
+  chat.el.appendChild(chip);
+  chat.el.appendChild(body);
+  return body;
+}
+
+function updateStepsChip() {
+  if (!S.stepsBody) return;
+  const chip = S.stepsBody.previousElementSibling as HTMLElement | null;
+  if (!chip || !chip.classList.contains("steps-chip")) return;
+  const secs = Math.max(1, Math.round((Date.now() - S.turnStart) / 1000));
+  chip.querySelector(".chip-label")!.textContent =
+    `Completed ${S.stepsCount} step${S.stepsCount === 1 ? "" : "s"} in ${secs}s`;
 }
 
 // action row shown after a finished turn: re-send this turn / copy its answer
@@ -396,25 +551,44 @@ function turnActionBar(turnId: string, blocks: MdBlock[]) {
 }
 
 function renderTurn(t: { prompt: string; task_type: string; messages: any[]; status: string; created?: number; id?: string }) {
-  chat.line(`\nYou  [${t.task_type}]${t.created ? "  " + stampOf(t.created) : ""}`, "c-user");
-  chat.line(t.prompt);
-  const blocks: MdBlock[] = [];
+  userPromptCard(t.prompt, t.created ? `[${t.task_type}]  ${stampOf(t.created)}` : `[${t.task_type}]`);
+  // tool activity: replayed collapsed behind the steps chip
+  const body = stepsChipEl();
+  S.stepsBody = body;
+  let steps = 0;
   for (const m of t.messages) {
     if (m.role === "assistant") {
-      if (m.content) {
-        chat.line("\nAssistant", "c-ok b");
-        const b = new MdBlock(chat.el, String(m.content).replace(/^\n+/, ""));
-        b.finish();
-        blocks.push(b);
-      }
       for (const tc of m.tool_calls ?? []) {
         let args: any = {};
         try { args = JSON.parse(tc.function.arguments || "{}"); } catch { args = { raw: tc.function.arguments }; }
         chatTool(tc.function.name, typeof args === "object" && args ? args : {});
+        steps += 1;
       }
     } else if (m.role === "tool") {
       const c = m.content ?? "";
-      chatResult(!c.startsWith("ERROR") && !c.startsWith("DENIED") && !c.startsWith("REJECTED"), c);
+      const tcid = m.tool_call_id ?? "";
+      const tc = t.messages.find((x: any) => x.role === "assistant" && (x.tool_calls ?? []).some((y: any) => y.id === tcid));
+      const tcall = tc?.tool_calls?.find((y: any) => y.id === tcid);
+      let args: any = {};
+      try { args = JSON.parse(tcall?.function?.arguments || "{}"); } catch { args = {}; }
+      const ok = !c.startsWith("ERROR") && !c.startsWith("DENIED") && !c.startsWith("REJECTED");
+      chatResult(ok, c, tcall?.function?.name ?? "", String(args.path ?? ""));
+    }
+  }
+  S.stepsCount = steps;
+  const chip = body.previousElementSibling as HTMLElement;
+  // the replayed duration is not stored; show the step count only
+  chip.querySelector(".chip-label")!.textContent =
+    `Completed ${steps} step${steps === 1 ? "" : "s"}`;
+  if (steps === 0) { chip.remove(); body.remove(); }
+  S.stepsBody = null;
+  // the final answer, after the chip
+  const blocks: MdBlock[] = [];
+  for (const m of t.messages) {
+    if (m.role === "assistant" && m.content) {
+      const b = new MdBlock(chat.el, String(m.content).replace(/^\n+/, ""));
+      b.finish();
+      blocks.push(b);
     }
   }
   if (t.id && blocks.length) turnActionBar(t.id, blocks);
@@ -456,12 +630,16 @@ function showSessionChat(title: string) {
   $("session-list-view").classList.add("hidden");
   $("session-chat-view").classList.remove("hidden");
   $("chat-view-title").textContent = title;
+  ($("input") as HTMLTextAreaElement).placeholder =
+    "Describe the task...  (Enter to send, Ctrl+Enter for newline, paste images to attach)";
   requestAnimationFrame(() => { chat.el.scrollTop = chat.el.scrollHeight; });
 }
 
 function showSessionList() {
   $("session-chat-view").classList.add("hidden");
   $("session-list-view").classList.remove("hidden");
+  ($("input") as HTMLTextAreaElement).placeholder =
+    "Describe the task...  (sending here starts a NEW session, Enter to send)";
 }
 
 $("chat-back-btn").addEventListener("click", showSessionList);
@@ -548,16 +726,15 @@ async function deleteSessions(ids: string[]) {
   }
 }
 
-// ------------------------------------------------- file tree + diff view
+// ------------------------------------------------- file tree + file viewer
 // Lazy tree of the project (VS Code explorer style): one level per click,
 // loaded through the file_tree RPC (works for local and remote backends).
-const S_DIFF = {
-  turns: [] as any[],
-  selectedTurn: null as string | null,
-  selectedFile: null as string | null,
-  showDiff: false,
-  currentContent: null as string | null,
-};
+// The mid pane shows open files as tabs; each tab keeps its own content.
+type OpenFile = { path: string; content: string | null; loading: boolean; changed: boolean; loadSeq: number };
+const S_FILES: OpenFile[] = [];
+let S_FILES_ACTIVE: string | null = null;
+// paths of files modified in this session, filled by loadTreeLevel
+let S_CHANGED_FILES: Set<string> | null = null;
 
 async function loadTreeLevel(container: HTMLElement, relPath: string, depth: number) {
   const r = await call("file_tree", { path: relPath });
@@ -569,6 +746,8 @@ async function loadTreeLevel(container: HTMLElement, relPath: string, depth: num
     return;
   }
   for (const e of r.entries) {
+    const full = (relPath ? relPath + "/" : "") + e.name;
+    if (e.changed && !e.dir && S_CHANGED_FILES) S_CHANGED_FILES.add(full);
     const row = document.createElement("div");
     row.className = "tree-row" + (e.dir ? " dir" : "") + (e.changed ? " changed" : "");
     row.style.paddingLeft = `${8 + depth * 14}px`;
@@ -615,7 +794,7 @@ async function loadTreeLevel(container: HTMLElement, relPath: string, depth: num
       row.addEventListener("click", () => {
         for (const el of document.querySelectorAll(".tree-row.sel")) el.classList.remove("sel");
         row.classList.add("sel");
-        void showFileDiff(relPath ? relPath + "/" + e.name : e.name);
+        openFile(relPath ? relPath + "/" + e.name : e.name, e.changed);
       });
     }
   }
@@ -625,163 +804,187 @@ async function refreshFileTree() {
   const root = $("file-tree");
   root.innerHTML = "";
   if (!S.root) { root.innerHTML = '<div class="muted" style="padding:8px">no project open</div>'; return; }
+  // collect the modified files while loading the (lazy) tree, then refresh
+  // the open-file tabs: update their "modified" flag and reload their content
+  // (the agent may have changed them)
+  S_CHANGED_FILES = new Set<string>();
   await loadTreeLevel(root, "", 0);
+  for (const f of S_FILES) {
+    f.changed = S_CHANGED_FILES.has(f.path);
+    if (f.content != null) void loadFile(f);
+  }
+  renderFileTabs();
 }
 
-// ------------------------------------------------- diff (line-level LCS)
-type DiffRow = { kind: "same" | "add" | "del"; oldNo: number | null; newNo: number | null; text: string };
+// ------------------------------------------------- file viewer (mid pane)
+// Open files are tabs; clicking a tab shows that file, the close button
+// removes it. Content is loaded once per file and kept in S_FILES.
+function fileName(path: string): string {
+  return path.split("/").pop() ?? path;
+}
 
-function diffLines(oldText: string, newText: string): DiffRow[] {
-  const a = oldText.split("\n");
-  const b = newText.split("\n");
-  // LCS on lines (guard against huge files: fall back to no-match rows)
-  if (a.length * b.length > 4_000_000) {
-    const rows: DiffRow[] = [];
-    a.forEach((t, i) => rows.push({ kind: "del", oldNo: i + 1, newNo: null, text: t }));
-    b.forEach((t, i) => rows.push({ kind: "add", oldNo: null, newNo: i + 1, text: t }));
-    return rows;
-  }
-  const n = a.length, m = b.length;
-  const dp: Uint32Array[] = [];
-  for (let i = 0; i <= n; i++) dp.push(new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+function renderFileTabs() {
+  const bar = $("file-tabs");
+  bar.innerHTML = "";
+  for (const f of S_FILES) {
+    const tab = document.createElement("div");
+    tab.className = "ftab" + (f.path === S_FILES_ACTIVE ? " active" : "");
+    tab.title = f.path;
+    const name = document.createElement("span");
+    name.className = "fname";
+    name.textContent = fileName(f.path);
+    tab.appendChild(name);
+    if (f.changed) {
+      const dot = document.createElement("span");
+      dot.className = "fdot";
+      dot.title = "modified in this session";
+      tab.appendChild(dot);
     }
+    const close = document.createElement("button");
+    close.className = "fclose";
+    close.textContent = "\u2715";
+    close.title = "Close file";
+    close.addEventListener("click", (e) => { e.stopPropagation(); closeFile(f.path); });
+    tab.appendChild(close);
+    tab.addEventListener("click", () => activateFile(f.path));
+    bar.appendChild(tab);
   }
-  const rows: DiffRow[] = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { rows.push({ kind: "same", oldNo: i + 1, newNo: j + 1, text: a[i] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ kind: "del", oldNo: i + 1, newNo: null, text: a[i] }); i++; }
-    else { rows.push({ kind: "add", oldNo: null, newNo: j + 1, text: b[j] }); j++; }
-  }
-  while (i < n) { rows.push({ kind: "del", oldNo: i + 1, newNo: null, text: a[i] }); i++; }
-  while (j < m) { rows.push({ kind: "add", oldNo: null, newNo: j + 1, text: b[j] }); j++; }
-  return rows;
 }
 
-function renderDiffRows(rows: DiffRow[]) {
-  const body = $("diff-body");
+function renderFileBody() {
+  const body = $("file-body");
   body.innerHTML = "";
+  const f = S_FILES.find((x) => x.path === S_FILES_ACTIVE);
+  if (!f) {
+    body.innerHTML = '<div class="muted">select a file in the Files tab</div>';
+    return;
+  }
+  if (f.loading) { body.innerHTML = '<div class="muted">loading...</div>'; return; }
+  if (f.content == null) { body.innerHTML = '<div class="c-error">failed to load file</div>'; return; }
+  const lines = f.content.split("\n");
   const frag = document.createDocumentFragment();
-  for (const r of rows) {
+  for (let i = 0; i < lines.length; i++) {
     const line = document.createElement("div");
-    line.className = "dline " + r.kind;
-    const noOld = document.createElement("span");
-    noOld.className = "dno";
-    noOld.textContent = r.oldNo ? String(r.oldNo) : "";
-    const noNew = document.createElement("span");
-    noNew.className = "dno";
-    noNew.textContent = r.newNo ? String(r.newNo) : "";
+    line.className = "fline";
+    const no = document.createElement("span");
+    no.className = "fno";
+    no.textContent = String(i + 1);
     const txt = document.createElement("span");
-    txt.className = "dtext";
-    txt.textContent = r.text === "" ? " " : r.text;
-    line.append(noOld, noNew, txt);
+    txt.className = "ftext";
+    txt.textContent = lines[i] === "" ? " " : lines[i];
+    line.append(no, txt);
     frag.appendChild(line);
   }
   body.appendChild(frag);
 }
 
-// ------------------------------------------------- file viewer (mid pane)
-// The mid pane shows the content of the file selected in the Files tree.
-// The ⇄ Diff toggle overlays the changes of the selected turn on top; it is
-// grayed out (disabled) when no turn modified the file.
-function fileHasChanges(): boolean {
-  if (!S_DIFF.selectedFile || !S_DIFF.selectedTurn) return false;
-  const t = S_DIFF.turns.find((x: any) => x.id === S_DIFF.selectedTurn);
-  return !!(t && (t.files_changed ?? []).includes(S_DIFF.selectedFile));
+function renderFileView() {
+  renderFileTabs();
+  renderFileBody();
+  renderFileAttachTag();
 }
 
-function updateDiffToggle() {
-  const btn = $("diff-toggle-btn") as HTMLButtonElement;
-  const enabled = fileHasChanges();
-  btn.disabled = !enabled;
-  btn.classList.toggle("diff-on", S_DIFF.showDiff && enabled);
-  btn.title = enabled
-    ? (S_DIFF.showDiff ? "Show the plain file content" : "Show the changes made to this file")
-    : "No turn has modified this file";
-  $("diff-turn-label").classList.toggle("hidden", !enabled);
+function activateFile(path: string) {
+  S_FILES_ACTIVE = path;
+  renderFileView();
 }
 
-function renderPlainView(content: string, note: string) {
-  const body = $("diff-body");
-  body.innerHTML = "";
-  if (note) {
-    const el = document.createElement("div");
-    el.className = "diff-note";
-    el.textContent = note;
-    body.appendChild(el);
+function closeFile(path: string) {
+  const i = S_FILES.findIndex((f) => f.path === path);
+  if (i < 0) return;
+  S_FILES.splice(i, 1);
+  if (S_FILES_ACTIVE === path) {
+    S_FILES_ACTIVE = S_FILES.length ? S_FILES[Math.max(0, i - 1)].path : null;
   }
-  const pre = document.createElement("pre");
-  pre.className = "dplain";
-  pre.textContent = content;
-  body.appendChild(pre);
+  renderFileView();
 }
 
-async function showFileDiff(relPath: string) {
-  S_DIFF.selectedFile = relPath;
-  S_DIFF.showDiff = false;
-  S_DIFF.currentContent = null;
-  $("diff-file-label").textContent = relPath;
-  $("diff-file-label").classList.remove("muted");
-  const body = $("diff-body");
-  body.innerHTML = '<div class="muted">loading...</div>';
-  const cur = await call("file_content", { path: relPath });
-  if (cur && cur.__error) { body.innerHTML = `<div class="c-error">${esc(cur.__error)}</div>`; updateDiffToggle(); return; }
-  S_DIFF.currentContent = cur.content;
-  if (fileHasChanges()) {
-    // a turn modified this file: show the diff by default
-    S_DIFF.showDiff = true;
-    void renderFileDiff();
-  } else {
-    renderPlainView(cur.content, "no turn has modified this file yet");
-  }
-  updateDiffToggle();
-}
-
-async function renderFileDiff() {
-  const body = $("diff-body");
-  if (!S_DIFF.selectedFile || !S_DIFF.selectedTurn || S_DIFF.currentContent == null) return;
-  body.innerHTML = '<div class="muted">loading...</div>';
-  const orig = await call("turn_file_original", { turn_id: S_DIFF.selectedTurn, path: S_DIFF.selectedFile });
-  if (orig && orig.__error) { body.innerHTML = `<div class="c-error">${esc(orig.__error)}</div>`; return; }
-  if (orig.original === null) {
-    renderPlainView(S_DIFF.currentContent, "not modified by the selected turn");
+function openFile(path: string, changed: boolean) {
+  const existing = S_FILES.find((f) => f.path === path);
+  if (existing) {
+    existing.changed = changed;
+    if (existing.content != null) { activateFile(path); return; }
+    if (!existing.loading) void loadFile(existing);
+    activateFile(path);
     return;
   }
-  renderDiffRows(diffLines(orig.original, S_DIFF.currentContent));
+  const f: OpenFile = { path, content: null, loading: true, changed, loadSeq: 0 };
+  S_FILES.push(f);
+  S_FILES_ACTIVE = path;
+  renderFileView();
+  void loadFile(f);
 }
 
-async function refreshDiffTurns() {
-  const sel = $("diff-turn-select") as HTMLSelectElement;
-  const r = await call("session_turns");
-  if (!r || r.__error) return;
-  S_DIFF.turns = r.turns;
-  const prev = S_DIFF.selectedTurn;
-  sel.innerHTML = "";
-  const withFiles = r.turns.filter((t: any) => (t.files_changed ?? []).length);
-  for (const t of withFiles) {
-    const opt = document.createElement("option");
-    opt.value = t.id;
-    opt.textContent = t.active ? `${t.index}. ${short(t.prompt, 40)}` : `(branch) ${short(t.prompt, 36)}`;
-    sel.appendChild(opt);
+async function loadFile(f: OpenFile) {
+  f.loading = true;
+  const seq = ++f.loadSeq; // a newer load invalidates this one
+  if (f.path === S_FILES_ACTIVE) renderFileBody();
+  const r = await call("file_content", { path: f.path });
+  if (seq !== f.loadSeq) return; // superseded by a newer load
+  f.content = r && r.__error ? null : r.content;
+  f.loading = false;
+  if (f.path === S_FILES_ACTIVE) {
+    renderFileBody();
+    // the tag only appears once the content has loaded
+    renderFileAttachTag();
   }
-  if (!withFiles.length) {
-    sel.innerHTML = "<option>(no file changes yet)</option>";
-    S_DIFF.selectedTurn = null;
-    if (!S_DIFF.selectedFile) $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
-  } else {
-    const last = withFiles[withFiles.length - 1];
-    S_DIFF.selectedTurn = withFiles.some((t: any) => t.id === prev) ? prev : last.id;
-    sel.value = S_DIFF.selectedTurn!;
+}
+
+function clearFileView() {
+  S_FILES.length = 0;
+  S_FILES_ACTIVE = null;
+  renderFileView();
+}
+
+// ------------------------------------------------- attach current file to prompt
+// When the main pane shows an open file, a "+name" tag appears above the input
+// box. Clicking it attaches the file's content to the next message (shown as
+// "xname"); clicking again detaches it.
+function renderFileAttachTag() {
+  const tag = $("file-attach-tag") as HTMLElement;
+  const active = S_FILES_ACTIVE ? S_FILES.find((f) => f.path === S_FILES_ACTIVE) : null;
+  if (!active || active.content == null) {
+    S.fileAttached = null;
+    tag.classList.add("hidden");
+    tag.innerHTML = "";
+    return;
   }
-  if (S_DIFF.selectedFile) {
-    // re-render: the diff toggle state depends on the selected turn
-    if (S_DIFF.showDiff && fileHasChanges()) void renderFileDiff();
-    else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "no turn has modified this file");
-    updateDiffToggle();
+  tag.classList.remove("hidden");
+  const attached = S.fileAttached === active.path;
+  tag.className = "file-attach-tag" + (attached ? " attached" : "");
+  tag.innerHTML = "";
+  const icon = document.createElement("span");
+  icon.className = "fatag-icon";
+  icon.textContent = attached ? "✕" : "+";
+  const name = document.createElement("span");
+  name.textContent = fileName(active.path);
+  tag.title = attached
+    ? `Remove ${active.path} from the next message`
+    : `Attach ${active.path} to the next message`;
+  tag.append(icon, name);
+  tag.onclick = () => {
+    S.fileAttached = attached ? null : active.path;
+    renderFileAttachTag();
+  };
+}
+
+// called from send(): appends the attached file's content to the prompt.
+// Must be called BEFORE startNewSession(): that clears the file view and
+// would silently drop the attachment.
+async function withAttachedFile(prompt: string): Promise<string> {
+  if (!S.fileAttached) return prompt;
+  const f = S_FILES.find((x) => x.path === S.fileAttached);
+  S.fileAttached = null;
+  renderFileAttachTag();
+  if (!f || f.content == null) return prompt;
+  let content = f.content;
+  let note = "";
+  if (content.length > MAX_FILE_CHARS) {
+    content = content.slice(0, MAX_FILE_CHARS);
+    note = `\n... (truncated, ${content.length} of ${f.content!.length} chars)`;
   }
+  const sep = prompt && !prompt.endsWith("\n") ? "\n" : "";
+  return `${prompt}${sep}\n<file ${f.path}>\n${content}${note}\n</file>\n`;
 }
 
 // ------------------------------------------------- context menu + modal
@@ -1490,6 +1693,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
         if (aEdit.value !== approvalText) {
           const ar = await call("save_approval_policy", { text: aEdit.value });
           if (ar && ar.__error) throw new Error("approval policy: " + ar.__error);
+          S.approvalPolicy = aEdit.value;
         }
         S.config = collect();
         recordModel(S.config.server?.provider ?? "", S.config.server?.model ?? "");
@@ -1502,6 +1706,8 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
         S.compressTarget = S.config.context?.compress_target ?? 0.5;
         ($("effort-combo") as HTMLSelectElement).value = S.effort;
         reloadTaskTypes();
+        refreshModelLabel();
+        refreshApprovalLabel();
         setCtxBar(0, S.ctxMax, false);
         refreshContextEstimate();
         refreshServerInfo();
@@ -1549,8 +1755,7 @@ async function editTurn(turnId: string) {
   const res = await editPromptModal("Edit prompt and run again", info, t.prompt);
   if (!res) return;
   const wasPlan = t.task_type === "plan";
-  const task = ($("task-combo") as HTMLSelectElement).value;
-  const taskType = task === "(auto)" ? null : task;
+  const taskType = S.curTaskType;
   const r = await call("edit_and_resubmit", {
     turn_id: turnId, prompt: res.prompt, task_type: taskType,
     keep_branch: res.keepBranch, plan_mode: wasPlan,
@@ -1579,7 +1784,7 @@ function wireTurnList() {
 wireTurnList();
 
 // ------------------------------------------------------------------ sending
-function send() {
+async function send() {
   const input = $("input") as HTMLTextAreaElement;
   const prompt = input.value.trim();
   if (!prompt || S.busy || !S.root) return;
@@ -1587,13 +1792,20 @@ function send() {
   const images = S.attachments.slice();
   S.attachments = [];
   renderAttachStrip();
-  const task = ($("task-combo") as HTMLSelectElement).value;
-  const taskType = task === "(auto)" ? null : task;
+  const taskType = S.curTaskType;
+  // the input box is also visible on the sessions list: sending there
+  // starts a fresh session and enters it first. Resolve the attached file
+  // BEFORE that (startNewSession clears the file view and would silently
+  // drop the attachment).
+  const fullPrompt = await withAttachedFile(prompt);
+  if (!$("session-list-view").classList.contains("hidden")) {
+    if (!(await startNewSession())) return;
+  }
   if (S.mode === 1) {
     if (images.length) chat.line("\n[plan mode: images are not sent to the planner]", "c-warn");
-    call("submit_plan", { goal: prompt }).then((r) => afterSubmit(r));
+    call("submit_plan", { goal: fullPrompt }).then((r) => afterSubmit(r));
   } else {
-    call("submit", { prompt, task_type: taskType, images }).then((r) => afterSubmit(r));
+    call("submit", { prompt: fullPrompt, task_type: taskType, images }).then((r) => afterSubmit(r));
   }
 }
 
@@ -1646,11 +1858,16 @@ function onEvent(ev: AgentEvent) {
     S.curTurnBlocks = [];
     thinking.clear();
     S.thinkChars = 0;
-    chat.line(`\nYou  [${d.task_type}]  ${stampOf(ev.ts)}`, "c-user");
-    chat.line(d.prompt);
+    userPromptCard(d.prompt, `[${d.task_type}]  ${stampOf(ev.ts)}`);
     if (Array.isArray(d.images) && d.images.length) {
-      chat.line(`[images: ${d.images.join(", ")}]`, "c-muted");
+      const im = document.createElement("span");
+      im.className = "c-muted";
+      im.textContent = `[images: ${d.images.join(", ")}]\n`;
+      chat.el.appendChild(im);
     }
+    // tool activity starts visible; collapses behind the chip at turn_finished
+    S.stepsCount = 0;
+    S.turnStart = Date.now();
     log(ev, `task type ${d.task_type}`);
     refreshTurnList();
     refreshSessionList();
@@ -1659,8 +1876,6 @@ function onEvent(ev: AgentEvent) {
     thinking.write(d.text, "c-muted");
   } else if (k === "content_delta") {
     if (S.block !== ev.agent_id) {
-      const who = ev.agent_id === "main" ? "" : ` (${ev.agent_id})`;
-      chat.line(`\nAssistant${who}  ${stampOf(ev.ts)}`, "c-ok b");
       S.block = ev.agent_id;
       S.blockFirst = true;
     }
@@ -1671,12 +1886,18 @@ function onEvent(ev: AgentEvent) {
     if (!S.mdBlock) { S.mdBlock = new MdBlock(chat.el); S.curTurnBlocks.push(S.mdBlock); }
     S.mdBlock.append(t);
   } else if (k === "tool_call") {
+    S.stepsCount += 1;
+    if (!S.stepsBody) S.stepsBody = stepsChipEl(); // first tool call: show the chip
+    updateStepsChip();
     chatTool(d.name, d.args ?? {}, ev.agent_id);
     log(ev, `${d.name} ${argsSummary(d.name, d.args ?? {})}`, "c-tool");
     const p = String((d.args ?? {}).path ?? "");
+    if (p) S.toolPaths.set(d.id ?? "", p);
     if (d.name === "read_file" && p.toLowerCase().endsWith(".md")) S.pendingDocs.set(d.id ?? "", p);
   } else if (k === "tool_result") {
-    chatResult(!!d.ok, d.text ?? "");
+    const tp = S.toolPaths.get(d.id ?? "") ?? "";
+    S.toolPaths.delete(d.id ?? "");
+    chatResult(!!d.ok, d.text ?? "", d.name ?? "", tp);
     log(ev, (d.ok ? "ok " : "FAILED ") + (d.text ?? ""), d.ok ? "" : "c-error");
     const doc = S.pendingDocs.get(d.id ?? "");
     if (doc) {
@@ -1719,6 +1940,14 @@ function onEvent(ev: AgentEvent) {
   } else if (k === "turn_finished") {
     S.mdBlock?.finish();
     S.mdBlock = null;
+    // collapse the tool activity behind the "Completed N steps in Xs" chip
+    if (S.stepsBody) {
+      if (S.stepsCount === 0) {
+        S.stepsBody.previousElementSibling?.remove();
+        S.stepsBody.remove();
+      } else updateStepsChip();
+      S.stepsBody = null;
+    }
     if (d.status !== "ok") chat.line(`\n-- ${d.status} --`, "c-muted");
     if (S.curTurnId && S.curTurnBlocks.length) turnActionBar(S.curTurnId, S.curTurnBlocks);
     S.curTurnId = null;
@@ -1730,7 +1959,6 @@ function onEvent(ev: AgentEvent) {
     refreshSessionList();
     refreshServerInfo();
     void refreshFileTree();
-    void refreshDiffTurns();
   } else if (k === "agent_finished") {
     log(ev, `${d.status} after ${d.steps} step(s)`);
   } else if (k === "plan_created" || k === "plan_started" || k === "subtask_started" || k === "subtask_finished" || k === "plan_finished") {
@@ -1757,7 +1985,6 @@ function onEvent(ev: AgentEvent) {
       await refreshSessionList();
       refreshContextEstimate();
       await refreshFileTree();
-      await refreshDiffTurns();
     })();
   } else if (k === "approval_requested") {
     log(ev, `approval requested: ${d.title ?? d.kind}`, "c-warn");
@@ -1846,23 +2073,6 @@ function bindTabs(barId: string, pagesId: string, pagePrefix: string) {
 bindTabs("left-tabs", "left-pages", "tab-");
 bindTabs("right-tabs", "bottom", "tab-");
 $("tree-refresh-btn").addEventListener("click", () => void refreshFileTree());
-($("diff-turn-select") as HTMLSelectElement).addEventListener("change", (e) => {
-  S_DIFF.selectedTurn = (e.target as HTMLSelectElement).value;
-  if (S_DIFF.selectedFile) {
-    if (fileHasChanges()) { S_DIFF.showDiff = true; void renderFileDiff(); }
-    else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "not modified by the selected turn");
-    updateDiffToggle();
-  }
-});
-// ⇄ Diff toggle: show/hide the changes of the selected turn (grayed out when
-// the file has no changes)
-$("diff-toggle-btn").addEventListener("click", () => {
-  if (!fileHasChanges()) return;
-  S_DIFF.showDiff = !S_DIFF.showDiff;
-  if (S_DIFF.showDiff) void renderFileDiff();
-  else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "");
-  updateDiffToggle();
-});
 
 function switchLeftTab(name: string) {
   const btn = document.querySelector(`#left-tabs .tab[data-tab="${name}"]`) as HTMLElement;
@@ -2058,9 +2268,21 @@ async function insertFile(p: string) {
   input.focus();
 }
 
-$("attach-btn").addEventListener("click", async () => {
-  const files = await window.api.pickFiles();
-  for (const f of files) await insertFile(f);
+// ＋ button: a menu with "Attach file..." and the task types (auto = none)
+$("attach-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const items: { label: string; enabled?: boolean; fn?: () => void }[] = [
+    { label: "📎  Attach file...", fn: async () => {
+      const files = await window.api.pickFiles();
+      for (const f of files) await insertFile(f);
+    } },
+  ];
+  for (const t of S.taskTypes) {
+    items.push({ label: `Task type: ${t}`, fn: () => { S.curTaskType = t; } });
+  }
+  items.push({ label: "Task type: (auto)", fn: () => { S.curTaskType = null; } });
+  showMenu(rect.left, rect.bottom + 4, items);
 });
 
 // Drag & drop files onto the prompt: text files are inserted, images attached.
@@ -2190,16 +2412,16 @@ $("image-btn").addEventListener("click", async () => {
   addImages([{ name, data_url: dataUrl }]).then(() => S.attachments.length);
 Object.defineProperty(window, "__attachments", { get: () => S.attachments });
 Object.defineProperty(window, "__root", { get: () => S.root });
+(window as any).__setBusy = setBusy;
+// render a tool line + result in the chat (used by CDP tests to exercise the
+// collapsible tool output without a running LLM)
+(window as any).__chatTool = (name: string, args: Record<string, any>, result?: string, ok = true) => {
+  chatTool(name, args);
+  if (result !== undefined) chatResult(ok, result);
+};
 
 // ------------------------------------------------------------------ wiring
-$("send-btn").addEventListener("click", () => {
-  if (S.busy) {
-    call("cancel");
-    chat.line("\n[stopping...]", "c-warn");
-  } else {
-    send();
-  }
-});
+$("send-btn").addEventListener("click", () => { void send(); });
 $("input").addEventListener("keydown", (e) => {
   if (e.code === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
@@ -2217,33 +2439,51 @@ $("stop-btn").addEventListener("click", () => {
   call("cancel");
   chat.line("\n[stopping...]", "c-warn");
 });
-$("mode-combo").addEventListener("change", (e) => {
-  S.mode = (e.target as HTMLSelectElement).selectedIndex;
+// mode button in the input toolbar: Agent / Plan & subtasks (was the toolbar select)
+$("mode-combo-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  showMenu(rect.left, rect.bottom + 4, [
+    { label: "Agent (single agent)", fn: () => { S.mode = 0; } },
+    { label: "Plan & subtasks (review the plan, confirm each stage)", fn: () => { S.mode = 1; } },
+  ]);
 });
 $("effort-combo").addEventListener("change", (e) => {
   S.effort = (e.target as HTMLSelectElement).value;
 });
+// model chip -> Settings > Model
+$("model-combo").addEventListener("click", () => {
+  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
+  void settingsDialog("model").then((saved) => { if (saved) { refreshModelLabel(); chat.line("\n[settings saved]", "c-ok"); } });
+});
+// footer chips -> Settings (connection / approval)
+$("conn-mode-label").addEventListener("click", () => {
+  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
+  void settingsDialog("connection").then((saved) => { if (saved) { refreshConnLabel(); chat.line("\n[settings saved]", "c-ok"); } });
+});
+$("approval-label").addEventListener("click", () => {
+  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
+  void settingsDialog("approval").then((saved) => { if (saved) { refreshApprovalLabel(); chat.line("\n[settings saved]", "c-ok"); } });
+});
+// chat view toolbar: jump to the turns list
+$("chat-turns-btn").addEventListener("click", () => switchLeftTab("turns"));
 $("server-ctx-btn").addEventListener("click", refreshServerInfo);
-$("new-session-btn").addEventListener("click", async () => {
-  if (S.busy || !S.root) return;
+// start a fresh session and enter its chat view; false on error (already
+// reported in the chat)
+async function startNewSession(): Promise<boolean> {
+  if (S.busy || !S.root) return false;
   const r = await call("new_session");
-  if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
+  if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return false; }
   resetViews();
   await refreshTurnList();
   await refreshSessionList();
   refreshContextEstimate();
-  S_DIFF.selectedFile = null;
-  S_DIFF.selectedTurn = null;
-  S_DIFF.showDiff = false;
-  S_DIFF.currentContent = null;
-  $("diff-file-label").textContent = "no file open";
-  $("diff-file-label").classList.add("muted");
-  $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
-  updateDiffToggle();
+  clearFileView();
   void refreshFileTree();
-  void refreshDiffTurns();
   showSessionChat("new session");
-});
+  return true;
+}
+$("new-session-btn").addEventListener("click", () => void startNewSession());
 // window controls (frameless window: the page draws its own title bar)
 $("win-min").addEventListener("click", () => void window.api.winMinimize());
 $("win-close").addEventListener("click", () => void window.api.winClose());
@@ -2288,9 +2528,11 @@ $("remote-label").addEventListener("click", () => {
   void settingsDialog("connection").then((saved) => { if (saved) chat.line("\n[settings saved]", "c-ok"); });
 });
 void refreshRemoteLabel();
+void refreshConnLabel();
+refreshModelLabel();
+refreshApprovalLabel();
 $("sp-btn").addEventListener("click", async () => {
-  const task = ($("task-combo") as HTMLSelectElement).value;
-  const taskType = task === "(auto)" ? "general" : task;
+  const taskType = S.curTaskType ?? "general";
   const r = await call("system_prompt", { task_type: taskType });
   if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
   // read-only modal
@@ -2703,10 +2945,10 @@ initLeftSplitter();
 initBottomSplitter();
 
 // ------------------------------------------------- input box resize handle
-// Drag #input-resize upward to enlarge the chat input box (min 70px, max 60%
-// of the chat view height); double-click resets it to the default 110px.
-const INPUT_DEFAULT = 110;
-const INPUT_MIN = 70;
+// Drag #input-resize upward to enlarge the chat input box (min 90px, max 60%
+// of the chat view height); double-click resets it to the default 130px.
+const INPUT_DEFAULT = 130;
+const INPUT_MIN = 90;
 const INPUT_MAX = 400;
 
 function setInputHeight(h: number) { ($("input-zone") as HTMLElement).style.height = `${h}px`; }
@@ -2721,7 +2963,7 @@ function initInputResize() {
     const grab = e.clientY - handle.getBoundingClientRect().top;
 
     const onMove = (ev: MouseEvent) => {
-      const view = $("session-chat-view").getBoundingClientRect();
+      const view = $("tab-sessions").getBoundingClientRect();
       let h = view.bottom - (ev.clientY - grab);
       h = Math.min(Math.max(h, INPUT_MIN), Math.max(INPUT_MIN, Math.min(INPUT_MAX, view.height * 0.6)));
       setInputHeight(h);

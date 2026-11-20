@@ -23,12 +23,14 @@ const SUITES = {
   ctxmenu: "cdp_ctxmenu_test.cjs",
   split: "cdp_split_test.cjs",
   files: "cdp_files_test.cjs",
+  fileattach: "cdp_fileattach_test.cjs",
   theme: "cdp_theme_test.cjs",
   debug: "cdp_debug_test.cjs",
   restart_close: "cdp_restart_close_test.cjs",
   remote: "cdp_remote_test.cjs",
   conn_switch: "cdp_conn_switch_test.cjs",
   terminal: "cdp_terminal_test.cjs",
+  collapsible: "cdp_collapsible_test.cjs",
 };
 
 function pick() {
