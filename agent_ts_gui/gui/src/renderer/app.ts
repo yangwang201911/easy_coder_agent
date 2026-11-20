@@ -1378,7 +1378,9 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       recordApiKey(c.server?.api_key ?? "");
       for (const m of r.models ?? []) recordModel(provider, m);
       updateModelDl?.();
-      showMsg(modelPage, true, `Models:\n${(r.models ?? []).join("\n")}\n\n${r.context_text ?? ""}`);
+      const vision = r.vision === false ? "\n\n⚠ This model does NOT accept images (text-only)."
+        : r.vision === true ? "\n\n✓ This model accepts images." : "";
+      showMsg(modelPage, true, `Models:\n${(r.models ?? []).join("\n")}\n\n${r.context_text ?? ""}${vision}`);
     });
     ctxPage.querySelector(".detect")!.addEventListener("click", async () => {
       const m = ctxPage.querySelector(".msg") as HTMLElement;

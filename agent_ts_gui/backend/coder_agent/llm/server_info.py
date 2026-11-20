@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +36,72 @@ class ContextInfo:
         if self.model_max:
             parts.append(f"model maximum {self.model_max:,}")
         return ", ".join(parts) or "server did not report a context length"
+
+
+# Tiny 1x1 red PNG, base64 - enough to ask the server "do you accept images?".
+_PROBE_IMAGE = ("data:image/png;base64,"
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+# (base_url, model) -> (result, monotonic ts); a re-probe costs a model call, so
+# the answer is cached for a while. ``None`` results are NOT cached.
+_vision_cache: dict[tuple[str, str], tuple[Optional[bool], float]] = {}
+_vision_lock = threading.Lock()
+_VISION_TTL = 600.0  # seconds
+
+
+def probe_vision(server: ServerConfig, timeout: float = 15.0) -> Optional[bool]:
+    """Ask the server whether the configured model accepts image inputs.
+
+    Sends a 1x1 PNG in a non-streaming chat completion and inspects the HTTP
+    status: ``True`` on 2xx, ``False`` when the server explicitly rejects image
+    input (Ollama without a vision projector answers 500 "image input is not
+    supported"), ``None`` when it cannot be determined (network error, unknown
+    status) - callers must treat ``None`` as "unknown, let the real request try".
+    Results are cached per (base_url, model) for a few minutes.
+    """
+    key = (server.base_url, server.model)
+    now = time.monotonic()
+    with _vision_lock:
+        hit = _vision_cache.get(key)
+        if hit and now - hit[1] < _VISION_TTL:
+            return hit[0]
+    result = _probe_vision_uncached(server, timeout)
+    if result is not None:
+        with _vision_lock:
+            _vision_cache[key] = (result, now)
+    return result
+
+
+def _probe_vision_uncached(server: ServerConfig, timeout: float) -> Optional[bool]:
+    client = DefaultHttpxClient(timeout=openai.Timeout(timeout), trust_env=not server.bypass_proxy)
+    try:
+        r = client.post(
+            server.base_url.rstrip("/") + "/chat/completions",
+            json={
+                "model": server.model,
+                "stream": False,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "image_url", "image_url": {"url": _PROBE_IMAGE}},
+                ]}],
+            },
+        )
+    except Exception:  # noqa: BLE001 - informational probe, never fatal
+        return None
+    finally:
+        client.close()
+    if r.status_code == 200:
+        return True
+    if r.status_code >= 400:
+        try:
+            body = r.text.lower()
+        except Exception:  # noqa: BLE001
+            body = ""
+        if "image" in body or "mmproj" in body or "vision" in body:
+            return False
+    return None
 
 
 def _norm(name: str) -> str:

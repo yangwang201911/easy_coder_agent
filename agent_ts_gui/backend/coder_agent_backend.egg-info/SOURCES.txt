@@ -19,6 +19,7 @@ coder_agent/defaults/approval.toml
 coder_agent/llm/__init__.py
 coder_agent/llm/base.py
 coder_agent/llm/openai_compat.py
+coder_agent/llm/prompt_dump.py
 coder_agent/llm/server_info.py
 coder_agent/llm/think_parser.py
 coder_agent/llm/toolparse.py

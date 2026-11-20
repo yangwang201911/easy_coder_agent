@@ -13,7 +13,16 @@ from openai import DefaultHttpxClient, OpenAI
 from ..config import SamplingConfig, ServerConfig, ThinkingConfig
 from .base import LLMCancelled, LLMChunk, LLMError, LLMProvider, ToolCall, Usage
 from .prompt_dump import dump_request
+from .server_info import probe_vision
 from .think_parser import ThinkParser
+
+
+def _has_image(messages: list[dict]) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+            return True
+    return False
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -89,6 +98,15 @@ class OpenAICompatProvider(LLMProvider):
         thinking: Optional[bool] = None,
         max_tokens: Optional[int] = None,
     ) -> Iterator[LLMChunk]:
+        # A text-only model (e.g. Ollama without a vision projector) answers
+        # 500 "image input is not supported" - fail fast with an actionable
+        # message instead of letting the raw server error surface. The probe
+        # result is cached; it only runs when the request actually carries images.
+        if _has_image(messages) and probe_vision(self.server) is False:
+            raise LLMError(
+                "the model server rejects image input (text-only model - e.g. Ollama "
+                "needs a vision-capable model / mmproj). Remove the image attachments "
+                "or switch to a vision model in Settings.")
         kw = self.build_request(messages, tools, thinking, max_tokens)
         if self.dump:
             dump_request(self.dump_root, kw)

@@ -37,7 +37,7 @@ from .config import AppConfig, load_config, save_config
 from .context.compression import available_strategies
 from .engine import Engine, _serialised
 from .events import EventBus
-from .llm import LLMProvider, create_provider, fetch_context_info
+from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
@@ -435,7 +435,8 @@ class Server:
         cfg = AppConfig.model_validate(p.get("config") or {})
         models = create_provider(cfg).list_models()
         info = fetch_context_info(cfg.server)
-        return {"models": models, "context": _jsonable(info), "context_text": info.describe()}
+        return {"models": models, "context": _jsonable(info), "context_text": info.describe(),
+                "vision": probe_vision(cfg.server)}
 
     def context_info(self, p: dict) -> dict:
         e = self._require_engine()
@@ -790,7 +791,10 @@ def run(argv: list[str], provider_factory: ProviderFactory = None) -> int:
     async def _run() -> None:
         server = Server(Path(args.root) if args.root else None, provider_factory)
         server.token = args.token or ""
-        srv = await websockets.serve(lambda ws, *args: handler(ws, server), args.host, args.port)
+        # default max_size is 1 MiB, which a single attached image (sent as a
+        # base64 data URL in the submit RPC) can exceed
+        srv = await websockets.serve(lambda ws, *args: handler(ws, server), args.host, args.port,
+                                     max_size=64 * 1024 * 1024)
         port = srv.sockets[0].getsockname()[1]
         # 0.0.0.0 is not a connectable address: print the machine's real IPs
         # so the GUI operator knows what to put in the Connection settings.
