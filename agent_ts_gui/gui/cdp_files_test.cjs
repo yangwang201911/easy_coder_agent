@@ -111,22 +111,16 @@ const check = (name, ok, extra = "") => {
   }
   check("collapsing/expanding src keeps working", fileRow);
 
-  // 4) click the unchanged file -> mid switches to Diff tab, plain content shown
+  // 4) click the unchanged file -> mid shows its content, diff toggle grayed out
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('hello.txt')).click()`);
-  let diffShown = false;
-  for (let i = 0; i < 20; i++) {
-    diffShown = !!(await evalJs(`!document.getElementById('diff-view').classList.contains('hidden')`));
-    if (diffShown) break;
-    await wait(300);
-  }
-  check("mid switched to Diff view", diffShown);
   let diffText = "";
   for (let i = 0; i < 20; i++) {
     diffText = await evalJs(`document.getElementById('diff-body').textContent`) ?? "";
     if (!diffText.includes("loading...") && diffText.includes("line2")) break;
     await wait(300);
   }
-  check("diff shows file content", diffText.includes("line2"), diffText.slice(0, 80));
+  check("mid shows file content", diffText.includes("line2"), diffText.slice(0, 80));
+  check("diff toggle disabled for unchanged file", (await evalJs(`document.getElementById('diff-toggle-btn').disabled`)) === true);
   check("diff turn select lists the seeded turn", !!(await evalJs(`document.getElementById('diff-turn-select').textContent.includes('seed turn')`)));
 
   // 4b) click the changed file -> real diff with deleted + added lines
@@ -145,13 +139,20 @@ const check = (name, ok, extra = "") => {
   check("changed file shows del/add diff lines", diffOk);
   if (!diffOk) console.log("backend:", backendLog().slice(-1500));
 
-  // 5) Chat tab still works: switch back and forth
-  await evalJs(`document.querySelector('#mid-tabs .tab[data-midtab="chat"]').click()`);
+  // 5) diff toggle: switch back to plain view and to diff view
+  await evalJs(`document.getElementById('diff-toggle-btn').click()`);
   await wait(200);
-  check("back to chat works", !!(await evalJs(`!document.getElementById('chat').classList.contains('hidden') && document.getElementById('diff-view').classList.contains('hidden')`)));
-  await evalJs(`document.querySelector('#mid-tabs .tab[data-midtab="diff"]').click()`);
+  check("toggle back to plain view", !!(await evalJs(`document.getElementById('diff-body').querySelector('.dplain')`)));
+  check("toggle off removes diff lines", !!(await evalJs(`!document.getElementById('diff-body').querySelector('.dline')`)));
+  await evalJs(`document.getElementById('diff-toggle-btn').click()`);
   await wait(200);
-  check("back to diff works", !!(await evalJs(`!document.getElementById('diff-view').classList.contains('hidden')`)));
+  let diffBack = false;
+  for (let i = 0; i < 20; i++) {
+    diffBack = !!(await evalJs(`document.getElementById('diff-body').querySelector('.dline.add')`));
+    if (diffBack) break;
+    await wait(300);
+  }
+  check("toggle back to diff works", diffBack);
 
   // 6) tree refresh button does not break
   await evalJs(`document.getElementById('tree-refresh-btn').click()`);

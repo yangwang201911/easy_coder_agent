@@ -1,6 +1,9 @@
 // Coder Agent GUI - main window: layout, RPC client, live event rendering.
 import markdownit from "markdown-it";
 import DOMPurify from "dompurify";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import type { AgentEvent, ReplyMsg } from "../types";
 
 // ------------------------------------------------------ markdown (chat only)
@@ -331,10 +334,20 @@ async function openProject(root: string, sessionId: string | null = null) {
   refreshServerInfo();
   S_DIFF.selectedFile = null;
   S_DIFF.selectedTurn = null;
-  $("diff-file-label").textContent = "";
+  S_DIFF.showDiff = false;
+  S_DIFF.currentContent = null;
+  $("diff-file-label").textContent = "no file open";
+  $("diff-file-label").classList.add("muted");
   $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
+  updateDiffToggle();
   void refreshFileTree();
   void refreshDiffTurns();
+  // open the current session's chat view
+  const cur = await call("session_summaries");
+  const title = cur && !cur.__error
+    ? (cur.sessions.find((s: any) => s.id === cur.current)?.title ?? "(empty)")
+    : "";
+  showSessionChat(`session: ${title}`);
 }
 
 function resetViews() {
@@ -433,6 +446,26 @@ async function refreshTurnList() {
   }
 }
 
+// ------------------------------------------------- session chat view
+// Clicking a session hides the sessions list and shows the chat (output) of
+// that session above the input box; the ← button goes back to the list.
+let sessionClickTimer: number | null = null;
+
+function showSessionChat(title: string) {
+  switchLeftTab("sessions");
+  $("session-list-view").classList.add("hidden");
+  $("session-chat-view").classList.remove("hidden");
+  $("chat-view-title").textContent = title;
+  requestAnimationFrame(() => { chat.el.scrollTop = chat.el.scrollHeight; });
+}
+
+function showSessionList() {
+  $("session-chat-view").classList.add("hidden");
+  $("session-list-view").classList.remove("hidden");
+}
+
+$("chat-back-btn").addEventListener("click", showSessionList);
+
 async function refreshSessionList() {
   const r = await call("session_summaries");
   if (!r || r.__error) return;
@@ -459,10 +492,20 @@ async function refreshSessionList() {
         li.classList.add("selected");
       }
       lastClicked = li;
+      // single click opens the chat view - only for the current session (the
+      // chat shows the current session's turns; other sessions are switched
+      // to with a double click, which then opens the chat as well). Deferred
+      // so a double click does not also fire.
+      if (sessionClickTimer) window.clearTimeout(sessionClickTimer);
+      if (s.id === r.current) {
+        const title = `session: ${s.title || "(empty)"}`;
+        sessionClickTimer = window.setTimeout(() => { sessionClickTimer = null; showSessionChat(title); }, 280);
+      }
     });
     li.addEventListener("dblclick", () => {
+      if (sessionClickTimer) { window.clearTimeout(sessionClickTimer); sessionClickTimer = null; }
       if (S.busy || s.id === r.current) return;
-      openProject(S.root!, s.id).then(() => switchLeftTab("turns"));
+      openProject(S.root!, s.id).then(() => showSessionChat(`session: ${s.title || "(empty)"}`));
     });
     li.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -475,7 +518,7 @@ async function refreshSessionList() {
       }
       showMenu(e.clientX, e.clientY, [
         { label: "Open", enabled: !S.busy && s.id !== r.current,
-          fn: () => openProject(S.root!, s.id).then(() => switchLeftTab("turns")) },
+          fn: () => openProject(S.root!, s.id).then(() => showSessionChat(`session: ${s.title || "(empty)"}`)) },
         { label: sel.length > 1 ? `Delete ${sel.length} selected sessions...` : "Delete session...",
           enabled: !S.busy, fn: () => deleteSessions(sel) },
       ]);
@@ -512,6 +555,8 @@ const S_DIFF = {
   turns: [] as any[],
   selectedTurn: null as string | null,
   selectedFile: null as string | null,
+  showDiff: false,
+  currentContent: null as string | null,
 };
 
 async function loadTreeLevel(container: HTMLElement, relPath: string, depth: number) {
@@ -638,43 +683,74 @@ function renderDiffRows(rows: DiffRow[]) {
   body.appendChild(frag);
 }
 
+// ------------------------------------------------- file viewer (mid pane)
+// The mid pane shows the content of the file selected in the Files tree.
+// The ⇄ Diff toggle overlays the changes of the selected turn on top; it is
+// grayed out (disabled) when no turn modified the file.
+function fileHasChanges(): boolean {
+  if (!S_DIFF.selectedFile || !S_DIFF.selectedTurn) return false;
+  const t = S_DIFF.turns.find((x: any) => x.id === S_DIFF.selectedTurn);
+  return !!(t && (t.files_changed ?? []).includes(S_DIFF.selectedFile));
+}
+
+function updateDiffToggle() {
+  const btn = $("diff-toggle-btn") as HTMLButtonElement;
+  const enabled = fileHasChanges();
+  btn.disabled = !enabled;
+  btn.classList.toggle("diff-on", S_DIFF.showDiff && enabled);
+  btn.title = enabled
+    ? (S_DIFF.showDiff ? "Show the plain file content" : "Show the changes made to this file")
+    : "No turn has modified this file";
+  $("diff-turn-label").classList.toggle("hidden", !enabled);
+}
+
+function renderPlainView(content: string, note: string) {
+  const body = $("diff-body");
+  body.innerHTML = "";
+  if (note) {
+    const el = document.createElement("div");
+    el.className = "diff-note";
+    el.textContent = note;
+    body.appendChild(el);
+  }
+  const pre = document.createElement("pre");
+  pre.className = "dplain";
+  pre.textContent = content;
+  body.appendChild(pre);
+}
+
 async function showFileDiff(relPath: string) {
   S_DIFF.selectedFile = relPath;
-  switchMidTab("diff");
+  S_DIFF.showDiff = false;
+  S_DIFF.currentContent = null;
   $("diff-file-label").textContent = relPath;
+  $("diff-file-label").classList.remove("muted");
   const body = $("diff-body");
   body.innerHTML = '<div class="muted">loading...</div>';
   const cur = await call("file_content", { path: relPath });
-  if (cur && cur.__error) { body.innerHTML = `<div class="c-error">${esc(cur.__error)}</div>`; return; }
-  if (!S_DIFF.selectedTurn) {
-    // no turn modified any file yet: plain view of the current content
-    body.innerHTML = "";
-    const note = document.createElement("div");
-    note.className = "diff-note";
-    note.textContent = "no turn has modified this file yet - showing current content";
-    body.appendChild(note);
-    const pre = document.createElement("pre");
-    pre.className = "dplain";
-    pre.textContent = cur.content;
-    body.appendChild(pre);
-    return;
+  if (cur && cur.__error) { body.innerHTML = `<div class="c-error">${esc(cur.__error)}</div>`; updateDiffToggle(); return; }
+  S_DIFF.currentContent = cur.content;
+  if (fileHasChanges()) {
+    // a turn modified this file: show the diff by default
+    S_DIFF.showDiff = true;
+    void renderFileDiff();
+  } else {
+    renderPlainView(cur.content, "no turn has modified this file yet");
   }
-  const orig = await call("turn_file_original", { turn_id: S_DIFF.selectedTurn, path: relPath });
+  updateDiffToggle();
+}
+
+async function renderFileDiff() {
+  const body = $("diff-body");
+  if (!S_DIFF.selectedFile || !S_DIFF.selectedTurn || S_DIFF.currentContent == null) return;
+  body.innerHTML = '<div class="muted">loading...</div>';
+  const orig = await call("turn_file_original", { turn_id: S_DIFF.selectedTurn, path: S_DIFF.selectedFile });
   if (orig && orig.__error) { body.innerHTML = `<div class="c-error">${esc(orig.__error)}</div>`; return; }
   if (orig.original === null) {
-    // the selected turn did not modify this file: plain view
-    body.innerHTML = "";
-    const note = document.createElement("div");
-    note.className = "diff-note";
-    note.textContent = "not modified by the selected turn - showing current content";
-    body.appendChild(note);
-    const pre = document.createElement("pre");
-    pre.className = "dplain";
-    pre.textContent = cur.content;
-    body.appendChild(pre);
+    renderPlainView(S_DIFF.currentContent, "not modified by the selected turn");
     return;
   }
-  renderDiffRows(diffLines(orig.original, cur.content));
+  renderDiffRows(diffLines(orig.original, S_DIFF.currentContent));
 }
 
 async function refreshDiffTurns() {
@@ -694,18 +770,18 @@ async function refreshDiffTurns() {
   if (!withFiles.length) {
     sel.innerHTML = "<option>(no file changes yet)</option>";
     S_DIFF.selectedTurn = null;
-    $("diff-body").innerHTML = '<div class="muted">no turn has modified any file yet</div>';
-    return;
+    if (!S_DIFF.selectedFile) $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
+  } else {
+    const last = withFiles[withFiles.length - 1];
+    S_DIFF.selectedTurn = withFiles.some((t: any) => t.id === prev) ? prev : last.id;
+    sel.value = S_DIFF.selectedTurn!;
   }
-  const last = withFiles[withFiles.length - 1];
-  S_DIFF.selectedTurn = withFiles.some((t: any) => t.id === prev) ? prev : last.id;
-  sel.value = S_DIFF.selectedTurn!;
-  if (S_DIFF.selectedFile) void showFileDiff(S_DIFF.selectedFile);
-}
-
-function switchMidTab(name: string) {
-  const btn = document.querySelector(`#mid-tabs .tab[data-midtab="${name}"]`) as HTMLElement;
-  btn?.click();
+  if (S_DIFF.selectedFile) {
+    // re-render: the diff toggle state depends on the selected turn
+    if (S_DIFF.showDiff && fileHasChanges()) void renderFileDiff();
+    else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "no turn has modified this file");
+    updateDiffToggle();
+  }
 }
 
 // ------------------------------------------------- context menu + modal
@@ -1613,6 +1689,8 @@ function onEvent(ev: AgentEvent) {
     }
   } else if (k === "command_output") {
     commands.write(d.text ?? "", "", true);
+  } else if (k === "terminal_output" || k === "terminal_exited") {
+    onTermEvent(k, d);
   } else if (k === "status") {
     setState(d.state, d.detail ?? "");
     if (d.state === "running_tool") commands.line(`\n$ (${d.detail ?? ""})`, "c-tool", true);
@@ -1752,44 +1830,190 @@ function renderPlan() {
 }
 
 // -------------------------------------------------------------------- tabs
-function bindTabs(barId: string, pagePrefix: string) {
+function bindTabs(barId: string, pagesId: string, pagePrefix: string) {
   const bar = $(barId);
+  const pages = $(pagesId);
   bar.querySelectorAll(".tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       bar.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       const name = (btn as HTMLElement).dataset.tab!;
-      const parent = bar.parentElement!;
-      parent.querySelectorAll(".tabpage").forEach((p) => p.classList.add("hidden"));
+      pages.querySelectorAll(".tabpage").forEach((p) => p.classList.add("hidden"));
       $(pagePrefix + name).classList.remove("hidden");
     });
   });
 }
-bindTabs("left-tabs", "tab-");
-bindTabs("right-tabs", "tab-");
-// mid pane: Chat / Diff views
-{
-  const bar = $("mid-tabs");
-  bar.querySelectorAll(".tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      bar.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const name = (btn as HTMLElement).dataset.midtab!;
-      $("chat").classList.toggle("hidden", name !== "chat");
-      $("diff-view").classList.toggle("hidden", name !== "diff");
-    });
-  });
-}
+bindTabs("left-tabs", "left-pages", "tab-");
+bindTabs("right-tabs", "bottom", "tab-");
 $("tree-refresh-btn").addEventListener("click", () => void refreshFileTree());
 ($("diff-turn-select") as HTMLSelectElement).addEventListener("change", (e) => {
   S_DIFF.selectedTurn = (e.target as HTMLSelectElement).value;
-  if (S_DIFF.selectedFile) void showFileDiff(S_DIFF.selectedFile);
+  if (S_DIFF.selectedFile) {
+    if (fileHasChanges()) { S_DIFF.showDiff = true; void renderFileDiff(); }
+    else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "not modified by the selected turn");
+    updateDiffToggle();
+  }
+});
+// ⇄ Diff toggle: show/hide the changes of the selected turn (grayed out when
+// the file has no changes)
+$("diff-toggle-btn").addEventListener("click", () => {
+  if (!fileHasChanges()) return;
+  S_DIFF.showDiff = !S_DIFF.showDiff;
+  if (S_DIFF.showDiff) void renderFileDiff();
+  else if (S_DIFF.currentContent != null) renderPlainView(S_DIFF.currentContent, "");
+  updateDiffToggle();
 });
 
 function switchLeftTab(name: string) {
   const btn = document.querySelector(`#left-tabs .tab[data-tab="${name}"]`) as HTMLElement;
   btn?.click();
 }
+
+// ----------------------------------------------------------------- terminals
+// Interactive shells on the backend (PTY). The list column shows open
+// terminals; the pane hosts one xterm.js instance per terminal (kept alive
+// while the tab is hidden so scrollback survives).
+const S_TERM = {
+  // ready=false until the terminal_open RPC answered: keystrokes typed in the
+  // meantime are buffered and flushed, so nothing is written to a dead id
+  terms: new Map<string, { x: XTerm; fit: FitAddon; closed: boolean; shell: string; ready: boolean; pending: string[] }>(),
+  current: null as string | null,
+};
+
+function termListEl() { return $("term-list") as HTMLElement; }
+function termPaneEl() { return $("term-pane") as HTMLElement; }
+
+function renderTermList() {
+  const ul = termListEl();
+  ul.innerHTML = "";
+  for (const [id, t] of S_TERM.terms) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${id}${t.closed ? " (exited)" : ""}`;
+    li.appendChild(label);
+    // close button: visible only while the row is hovered (see .term-x in CSS)
+    const x = document.createElement("button");
+    x.className = "term-x";
+    x.title = "Close terminal";
+    x.textContent = "✕";
+    x.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeTerminal(id);
+    });
+    li.appendChild(x);
+    if (id === S_TERM.current) li.classList.add("selected");
+    li.addEventListener("click", () => selectTerminal(id));
+    ul.appendChild(li);
+  }
+}
+
+function showTermPane(id: string | null) {
+  const pane = termPaneEl();
+  for (const [tid, t] of S_TERM.terms) {
+    (t.x.element as HTMLElement).style.display = tid === id ? "" : "none";
+  }
+  let empty = pane.querySelector(".term-empty");
+  if (id) {
+    empty?.remove();
+    const t = S_TERM.terms.get(id);
+    if (t) {
+      requestAnimationFrame(() => { t.fit.fit(); t.x.focus(); });
+    }
+  } else {
+    if (!empty) {
+      empty = document.createElement("div");
+      empty.className = "term-empty";
+      empty.textContent = "no terminal - click ＋ to open one";
+      pane.appendChild(empty);
+    }
+  }
+}
+
+function selectTerminal(id: string) {
+  S_TERM.current = id;
+  renderTermList();
+  showTermPane(id);
+}
+
+function closeTerminal(id: string) {
+  const t = S_TERM.terms.get(id);
+  if (t) {
+    t.x.dispose();
+    S_TERM.terms.delete(id);
+  }
+  if (S_TERM.current === id) S_TERM.current = null;
+  call("terminal_close", { id });
+  renderTermList();
+  showTermPane(S_TERM.current);
+}
+
+async function openTerminal() {
+  const pane = termPaneEl();
+  const x = new XTerm({
+    cursorBlink: true,
+    fontSize: 12,
+    theme: { background: "#1e1e1e" },
+    scrollback: 5000,
+  });
+  const fit = new FitAddon();
+  x.loadAddon(fit);
+  x.open(pane);
+  (x.element as HTMLElement).style.display = "none";
+  (x.element as any).__xterm = x;  // CDP test hook
+  const id = `term-${Date.now().toString(36)}`;  // placeholder until the RPC answers
+  S_TERM.terms.set(id, { x, fit, closed: false, shell: "", ready: false, pending: [] });
+  const bind = (tid: string) => ({
+    data: x.onData((data) => {
+      const rec = S_TERM.terms.get(tid);
+      if (!rec) return;
+      if (!rec.ready) { rec.pending.push(data); return; }  // RPC still in flight
+      call("terminal_write", { id: tid, data });
+    }),
+    resize: x.onResize(({ cols, rows }) => call("terminal_resize", { id: tid, cols, rows })),
+  });
+  const h = bind(id);
+  renderTermList();  // show the pending entry immediately
+
+  const r = await call("terminal_open", { cols: x.cols, rows: x.rows, cwd: S.root ?? undefined });
+  if (r?.__error) {
+    h.data.dispose(); h.resize.dispose();
+    x.dispose();
+    S_TERM.terms.delete(id);
+    chat.line(`\n[terminal] ${r.__error}`, "c-error");
+    renderTermList();
+    return;
+  }
+  const real = r.id as string;
+  h.data.dispose(); h.resize.dispose();  // replace the placeholder-id handlers
+  const pending = S_TERM.terms.get(id)?.pending ?? [];
+  S_TERM.terms.delete(id);
+  S_TERM.terms.set(real, { x, fit, closed: false, shell: r.shell ?? "", ready: true, pending: [] });
+  bind(real);
+  for (const data of pending) call("terminal_write", { id: real, data });  // flush early keystrokes
+  selectTerminal(real);
+}
+
+function onTermEvent(k: string, d: Record<string, any>) {
+  const id = d.id as string;
+  const t = S_TERM.terms.get(id);
+  if (!t) return;
+  if (k === "terminal_output") t.x.write(d.text ?? "");
+  else if (k === "terminal_exited") {
+    t.closed = true;
+    t.x.write(`\r\n[process exited${d.exit_code != null ? ` with code ${d.exit_code}` : ""}]\r\n`);
+    renderTermList();
+  }
+}
+
+$("term-new-btn").addEventListener("click", () => void openTerminal());
+// exposed for automated UI tests (CDP)
+Object.defineProperty(window, "__terminals", {
+  get: () => ({ count: S_TERM.terms.size, current: S_TERM.current }),
+});
+// re-fit the visible terminal when the pane resizes (window / splitter drag)
+new ResizeObserver(() => {
+  if (S_TERM.current) S_TERM.terms.get(S_TERM.current)?.fit.fit();
+}).observe(termPaneEl());
 
 // --------------------------------------------------------------- file attach
 // Insert a file's content into the prompt so it is part of the message
@@ -2010,11 +2234,15 @@ $("new-session-btn").addEventListener("click", async () => {
   refreshContextEstimate();
   S_DIFF.selectedFile = null;
   S_DIFF.selectedTurn = null;
-  $("diff-file-label").textContent = "";
+  S_DIFF.showDiff = false;
+  S_DIFF.currentContent = null;
+  $("diff-file-label").textContent = "no file open";
+  $("diff-file-label").classList.add("muted");
   $("diff-body").innerHTML = '<div class="muted">select a file in the Files tab</div>';
+  updateDiffToggle();
   void refreshFileTree();
   void refreshDiffTurns();
-  switchLeftTab("turns");
+  showSessionChat("new session");
 });
 // window controls (frameless window: the page draws its own title bar)
 $("win-min").addEventListener("click", () => void window.api.winMinimize());
@@ -2360,15 +2588,14 @@ $("root-label").title = "Click to switch / manage projects";
 $("root-label").addEventListener("click", chooseProject);
 
 // ------------------------------------------------------- resizable splitters
-const SPLIT_DEFAULTS = { left: 260, right: 520, input: 130 };
+const SPLIT_DEFAULTS = { left: 260, bottom: 240 };
 const SPLIT_LIMITS = {
   left: [180, 600] as const,
-  right: [260, 1000] as const,
-  input: [80, 400] as const,
+  bottom: [120, 600] as const,
 };
 const SPLIT_STORE = "coder-agent-panel-widths";
 
-function loadSplitSizes(): { left?: number; right?: number; input?: number } {
+function loadSplitSizes(): { left?: number; bottom?: number } {
   try {
     const raw = localStorage.getItem(SPLIT_STORE);
     return raw ? JSON.parse(raw) : {};
@@ -2380,20 +2607,17 @@ function loadSplitSizes(): { left?: number; right?: number; input?: number } {
 function saveSplitSizes() {
   const sizes = {
     left: Math.round($("left").getBoundingClientRect().width),
-    right: Math.round($("right").getBoundingClientRect().width),
-    input: Math.round($("input-zone").getBoundingClientRect().height),
+    bottom: Math.round($("bottom").getBoundingClientRect().height),
   };
   try { localStorage.setItem(SPLIT_STORE, JSON.stringify(sizes)); } catch { /* ignore */ }
 }
 
 function setSplitLeft(w: number) { ($("left") as HTMLElement).style.width = `${w}px`; }
-function setSplitRight(w: number) { ($("right") as HTMLElement).style.width = `${w}px`; }
-function setSplitInput(h: number) { ($("input-zone") as HTMLElement).style.height = `${h}px`; }
+function setSplitBottom(h: number) { ($("bottom") as HTMLElement).style.height = `${h}px`; }
 
-function initSplitter(splitId: "split-left" | "split-right") {
-  const splitter = $(splitId);
-  const isLeft = splitId === "split-left";
-  const limits = SPLIT_LIMITS[isLeft ? "left" : "right"];
+function initLeftSplitter() {
+  const splitter = $("split-left");
+  const limits = SPLIT_LIMITS.left;
   const body = $("body");
 
   splitter.addEventListener("mousedown", (e) => {
@@ -2406,23 +2630,17 @@ function initSplitter(splitId: "split-left" | "split-right") {
     const grab = e.clientX - (splitter.getBoundingClientRect().left + 1);
 
     const onMove = (ev: MouseEvent) => {
-      // position the pane absolutely from the cursor: the handle's center
-      // stays at (cursor - grab) at all times.
+      // position the pane from the cursor: the handle's center stays at
+      // (cursor - grab) at all times.
       //   4px body padding + 2px splitter margin + 1px half splitter width = 7px
       // (w is the border-box width, so the pane border is already inside it)
       const bodyRect = body.getBoundingClientRect();
-      let w = isLeft
-        ? ev.clientX - grab - bodyRect.left - 7
-        : bodyRect.right - (ev.clientX - grab) - 7;
+      let w = ev.clientX - grab - bodyRect.left - 7;
       // clamp: within limits and leave at least 120px for the middle pane.
-      // non-mid space = 2x padding(4) + 4x margins(2) + 2x splitters(2) = 22
-      const room = bodyRect.width - 22 - 120;
-      const otherW = isLeft
-        ? ($("right") as HTMLElement).offsetWidth
-        : ($("left") as HTMLElement).offsetWidth;
-      const maxByMid = Math.max(limits[0], room - otherW);
-      w = Math.min(Math.max(w, limits[0]), maxByMid, limits[1]);
-      if (isLeft) setSplitLeft(w); else setSplitRight(w);
+      // non-mid space = 2x padding(4) + 2x margins(2) + 1x splitter(2) = 14
+      const room = bodyRect.width - 14 - 120;
+      w = Math.min(Math.max(w, limits[0]), Math.max(limits[0], room), limits[1]);
+      setSplitLeft(w);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
@@ -2436,17 +2654,15 @@ function initSplitter(splitId: "split-left" | "split-right") {
   });
 
   splitter.addEventListener("dblclick", () => {
-    const w = SPLIT_DEFAULTS[isLeft ? "left" : "right"];
-    if (isLeft) setSplitLeft(w); else setSplitRight(w);
+    setSplitLeft(SPLIT_DEFAULTS.left);
     saveSplitSizes();
   });
 }
 
-function initInputSplitter() {
-  const splitter = $("split-input");
-  const mid = $("mid");
-  const zone = $("input-zone");
-  const limits = SPLIT_LIMITS.input;
+function initBottomSplitter() {
+  const splitter = $("split-bottom");
+  const col = $("main-col");
+  const limits = SPLIT_LIMITS.bottom;
 
   splitter.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
@@ -2456,12 +2672,12 @@ function initInputSplitter() {
     const grab = e.clientY - (splitter.getBoundingClientRect().top + 1);
 
     const onMove = (ev: MouseEvent) => {
-      // zone height from the cursor: the handle center is 2px (zone margin)
-      // + 1px (half splitter) above the zone top
-      const midRect = mid.getBoundingClientRect();
-      let h = midRect.bottom - (ev.clientY - grab) - 3;
+      // bottom height from the cursor: the handle center is 2px (splitter
+      // margin) + 1px (half splitter) above the panel top
+      const colRect = col.getBoundingClientRect();
+      let h = colRect.bottom - (ev.clientY - grab) - 3;
       h = Math.min(Math.max(h, limits[0]), limits[1]);
-      setSplitInput(h);
+      setSplitBottom(h);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
@@ -2475,18 +2691,55 @@ function initInputSplitter() {
   });
 
   splitter.addEventListener("dblclick", () => {
-    setSplitInput(SPLIT_DEFAULTS.input);
+    setSplitBottom(SPLIT_DEFAULTS.bottom);
     saveSplitSizes();
   });
 }
 
 const savedSplits = loadSplitSizes();
 if (savedSplits.left) setSplitLeft(savedSplits.left);
-if (savedSplits.right) setSplitRight(savedSplits.right);
-if (savedSplits.input) setSplitInput(savedSplits.input);
-initSplitter("split-left");
-initSplitter("split-right");
-initInputSplitter();
+if (savedSplits.bottom) setSplitBottom(savedSplits.bottom);
+initLeftSplitter();
+initBottomSplitter();
+
+// ------------------------------------------------- input box resize handle
+// Drag #input-resize upward to enlarge the chat input box (min 70px, max 60%
+// of the chat view height); double-click resets it to the default 110px.
+const INPUT_DEFAULT = 110;
+const INPUT_MIN = 70;
+const INPUT_MAX = 400;
+
+function setInputHeight(h: number) { ($("input-zone") as HTMLElement).style.height = `${h}px`; }
+
+function initInputResize() {
+  const handle = $("input-resize");
+  handle.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing-h");
+    const grab = e.clientY - handle.getBoundingClientRect().top;
+
+    const onMove = (ev: MouseEvent) => {
+      const view = $("session-chat-view").getBoundingClientRect();
+      let h = view.bottom - (ev.clientY - grab);
+      h = Math.min(Math.max(h, INPUT_MIN), Math.max(INPUT_MIN, Math.min(INPUT_MAX, view.height * 0.6)));
+      setInputHeight(h);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      handle.classList.remove("dragging");
+      document.body.classList.remove("resizing-h");
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+  handle.addEventListener("dblclick", () => {
+    ($("input-zone") as HTMLElement).style.height = `${INPUT_DEFAULT}px`;
+  });
+}
+initInputResize();
 
 // ------------------------------------------------------------------- boot
 let backendDown = false;

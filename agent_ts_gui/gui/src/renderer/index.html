@@ -37,67 +37,87 @@
         <button class="tab" data-tab="sessions">Sessions</button>
         <button class="tab" data-tab="files">Files</button>
       </div>
-      <div id="tab-turns" class="tabpage">
-        <ul id="turn-list" class="list"></ul>
-      </div>
-      <div id="tab-sessions" class="tabpage hidden">
-        <button id="new-session-btn" class="wide">New session</button>
-        <ul id="session-list" class="list"></ul>
-      </div>
-      <div id="tab-files" class="tabpage hidden">
-        <div id="tree-toolbar">
-          <button id="tree-refresh-btn" title="Reload the tree">⟳</button>
-          <span class="muted">project files</span>
+      <div id="left-pages">
+        <div id="tab-turns" class="tabpage">
+          <ul id="turn-list" class="list"></ul>
         </div>
-        <div id="file-tree"></div>
+        <div id="tab-sessions" class="tabpage hidden">
+          <div id="session-list-view">
+            <button id="new-session-btn" class="wide">New session</button>
+            <ul id="session-list" class="list"></ul>
+          </div>
+          <div id="session-chat-view" class="hidden">
+            <div id="chat-view-toolbar">
+              <button id="chat-back-btn" title="Back to the sessions list">←</button>
+              <span id="chat-view-title" class="muted">session</span>
+            </div>
+            <div id="chat" class="log"></div>
+            <div id="input-resize" title="Drag up to enlarge the input box, double-click to reset"></div>
+            <div id="input-zone">
+              <div id="attach-strip" class="hidden"></div>
+              <textarea id="input" placeholder="Describe the task...  (Enter to send, Ctrl+Enter for newline, paste images to attach)"></textarea>
+              <div id="send-row">
+                <span class="flex1"></span>
+                <button id="attach-btn" title="Insert a file's content into the prompt">📎 File</button>
+                <button id="image-btn" title="Attach images (or paste screenshots)">🖼 Image</button>
+                <button id="send-btn">Send</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="tab-files" class="tabpage hidden">
+          <div id="tree-toolbar">
+            <button id="tree-refresh-btn" title="Reload the tree">⟳</button>
+            <span class="muted">project files</span>
+          </div>
+          <div id="file-tree"></div>
+        </div>
       </div>
     </div>
 
     <div class="splitter" id="split-left" title="Drag to resize, double-click to reset"></div>
 
+    <div id="main-col">
     <div id="mid">
-      <div id="mid-tabs">
-        <button class="tab active" data-midtab="chat">Chat</button>
-        <button class="tab" data-midtab="diff">Diff</button>
-      </div>
-      <div id="chat" class="log"></div>
-      <div id="diff-view" class="hidden">
+      <div id="file-view">
         <div id="diff-toolbar">
-          <label>Turn: <select id="diff-turn-select"></select></label>
-          <span id="diff-file-label" class="m"></span>
+          <button id="diff-toggle-btn" disabled title="Show the changes made to this file">⇄ Diff</button>
+          <label id="diff-turn-label" class="hidden">Turn: <select id="diff-turn-select"></select></label>
+          <span id="diff-file-label" class="m muted">no file open</span>
           <span class="flex1"></span>
           <span class="muted">read-only</span>
         </div>
         <div id="diff-body" class="m"></div>
       </div>
-      <div class="splitter h" id="split-input" title="Drag to resize, double-click to reset"></div>
-      <div id="input-zone">
-        <div id="attach-strip" class="hidden"></div>
-        <textarea id="input" placeholder="Describe the task...  (Enter to send, Ctrl+Enter for newline, paste images to attach)"></textarea>
-        <div id="send-row">
-          <span class="flex1"></span>
-          <button id="attach-btn" title="Insert a file's content into the prompt">📎 File</button>
-          <button id="image-btn" title="Attach images (or paste screenshots)">🖼 Image</button>
-          <button id="send-btn">Send</button>
-        </div>
-      </div>
     </div>
 
-    <div class="splitter" id="split-right" title="Drag to resize, double-click to reset"></div>
+    <div class="splitter h" id="split-bottom" title="Drag to resize, double-click to reset"></div>
 
-    <div id="right">
-      <div id="right-tabs">
+    <div id="bottom">
+      <div id="right-tabs" class="bottom-tabs">
         <button class="tab active" data-tab="activity">Activity</button>
         <button class="tab" data-tab="plan">Plan</button>
         <button class="tab" data-tab="thinking">Thinking</button>
         <button class="tab" data-tab="commands">Commands</button>
         <button class="tab" data-tab="docs">Docs read</button>
+        <button class="tab" data-tab="terminals">Terminals</button>
       </div>
       <div id="tab-activity" class="tabpage log mono"></div>
       <div id="tab-plan" class="tabpage hidden"></div>
       <div id="tab-thinking" class="tabpage log hidden"></div>
       <div id="tab-commands" class="tabpage log mono hidden"></div>
       <div id="tab-docs" class="tabpage log mono hidden"></div>
+      <div id="tab-terminals" class="tabpage hidden">
+        <div id="term-list-col">
+          <div id="term-list-toolbar">
+            <button id="term-new-btn" title="New terminal">＋</button>
+            <button id="term-close-btn" class="hidden" title="Close selected terminal" disabled>✕</button>
+          </div>
+          <ul id="term-list" class="list"></ul>
+        </div>
+        <div id="term-pane"></div>
+      </div>
+    </div>
     </div>
   </div>
 

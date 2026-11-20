@@ -76,35 +76,20 @@ const app = spawnApp({});
   const afterCenter = await get("((s)=>{const r=s.getBoundingClientRect();return r.left+r.width/2})(document.getElementById('split-left'))");
   console.log("split-left center after +100 drag:", afterCenter);
 
-  // drag split-right +50px (right splitter: drag left to grow)
-  const rightBeforeCenter = await get("((s)=>{const r=s.getBoundingClientRect();return r.left+r.width/2})(document.getElementById('split-right'))");
+  // drag split-bottom up by 50px (bottom panel grows)
+  const bottomBefore = await get("document.getElementById('bottom').getBoundingClientRect().height");
   await evalIn(`(() => {
-    const s = document.getElementById('split-right');
-    const r = s.getBoundingClientRect();
-    const x = r.left + r.width/2, y = r.top + 100;
-    s.dispatchEvent(new MouseEvent('mousedown', { clientX: x, clientY: y, button: 0, bubbles: true }));
-    for (let i = 1; i <= 5; i++)
-      window.dispatchEvent(new MouseEvent('mousemove', { clientX: x - i*10, clientY: y, bubbles: true }));
-    window.dispatchEvent(new MouseEvent('mouseup', { clientX: x - 50, clientY: y, bubbles: true }));
-  })()`);
-  await wait(100);
-  const rightAfterCenter = await get("((s)=>{const r=s.getBoundingClientRect();return r.left+r.width/2})(document.getElementById('split-right'))");
-  console.log("split-right center before:", rightBeforeCenter, "after -50 drag:", rightAfterCenter);
-
-  // drag the horizontal input splitter up by 40px (zone grows)
-  const inputBefore = await get("document.getElementById('input-zone').getBoundingClientRect().height");
-  await evalIn(`(() => {
-    const s = document.getElementById('split-input');
+    const s = document.getElementById('split-bottom');
     const r = s.getBoundingClientRect();
     const x = r.left + r.width/2, y = r.top + r.height/2;
     s.dispatchEvent(new MouseEvent('mousedown', { clientX: x, clientY: y, button: 0, bubbles: true }));
-    for (let i = 1; i <= 4; i++)
+    for (let i = 1; i <= 5; i++)
       window.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y - i*10, bubbles: true }));
-    window.dispatchEvent(new MouseEvent('mouseup', { clientX: x, clientY: y - 40, bubbles: true }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: x, clientY: y - 50, bubbles: true }));
   })()`);
   await wait(100);
-  const inputAfter = await get("document.getElementById('input-zone').getBoundingClientRect().height");
-  console.log("input-zone before:", inputBefore, "after -40 drag:", inputAfter);
+  const bottomAfter = await get("document.getElementById('bottom').getBoundingClientRect().height");
+  console.log("bottom before:", bottomBefore, "after -50 drag:", bottomAfter);
 
   const stored = await get("localStorage.getItem('coder-agent-panel-widths')");
   console.log("stored:", stored);
@@ -116,8 +101,7 @@ const app = spawnApp({});
   console.log("left after dblclick reset:", reset);
 
   const ok = Math.abs(afterCenter - (beforeCenter + 100)) < 1
-    && Math.abs(rightAfterCenter - (rightBeforeCenter - 50)) < 1
-    && Math.abs(inputAfter - (inputBefore + 40)) < 1
+    && Math.abs(bottomAfter - (bottomBefore + 50)) < 1
     && Math.abs(reset - 260) < 1;
   console.log(ok ? "SPLIT TEST PASS" : "SPLIT TEST FAIL");
   ws.close();

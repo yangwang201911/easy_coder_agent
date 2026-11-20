@@ -41,6 +41,7 @@ from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
+from .terminal import Terminal, open_terminal
 
 ProviderFactory = Optional[Callable[[], LLMProvider]]  # injectable for tests
 
@@ -168,6 +169,9 @@ class Server:
         self._busy = False
         self._counter = 0
         self._unsubscribe = None  # EventBus subscription of the current engine
+        self.terminals: dict[str, Terminal] = {}
+        self._terminals_lock = threading.Lock()
+        self._term_seq = 0
         self._methods: dict[str, Callable[..., Any]] = self._register()
 
     # ------------------------------------------------------------- plumbing
@@ -209,6 +213,11 @@ class Server:
             "file_tree": self.file_tree,
             "file_content": self.file_content,
             "turn_file_original": self.turn_file_original,
+            "terminal_open": self.terminal_open,
+            "terminal_write": self.terminal_write,
+            "terminal_resize": self.terminal_resize,
+            "terminal_close": self.terminal_close,
+            "terminal_list": self.terminal_list,
         }
 
     @property
@@ -535,6 +544,55 @@ class Server:
         rel = p["path"]
         original = s.snapshots.snapshot_content(p["turn_id"], rel)
         return {"path": rel, "turn_id": p["turn_id"], "original": original}
+
+    # ------------------------------------------------------------- terminals
+    def _term(self, term_id: str) -> Terminal:
+        with self._terminals_lock:
+            t = self.terminals.get(term_id)
+        if t is None:
+            raise RuntimeError(f"no such terminal {term_id!r}")
+        return t
+
+    def terminal_open(self, p: dict) -> dict:
+        with self._terminals_lock:
+            self._term_seq += 1
+            term_id = f"term-{self._term_seq}"
+        cols = int(p.get("cols") or 80)
+        rows = int(p.get("rows") or 24)
+        cwd = p.get("cwd") or (str(self.root) if self.root else None)
+        term = open_terminal(term_id, shell=p.get("shell"), cwd=cwd, cols=cols, rows=rows)
+        # push_event is (kind, agent_id, data); the terminal only knows kind+data
+        term.start(lambda kind, data: self.push_event(kind, "terminal", data))
+        # drop finished terminals from the registry (the GUI keeps its own copy)
+        term.on_exit = lambda t: self.terminals.pop(t.id, None)
+        with self._terminals_lock:
+            self.terminals[term_id] = term
+        return {"id": term_id, "shell": term.shell, "cwd": term.cwd, "cols": cols, "rows": rows}
+
+    def terminal_write(self, p: dict) -> dict:
+        self._term(p["id"]).write(p.get("data") or "")
+        return {"ok": True}
+
+    def terminal_resize(self, p: dict) -> dict:
+        self._term(p["id"]).resize(int(p.get("cols") or 80), int(p.get("rows") or 24))
+        return {"ok": True}
+
+    def terminal_close(self, p: dict) -> dict:
+        with self._terminals_lock:
+            t = self.terminals.pop(p["id"], None)
+        if t is None:
+            return {"ok": True}  # already gone (exited)
+        t.close()
+        return {"ok": True}
+
+    def terminal_list(self, p: dict) -> dict:
+        with self._terminals_lock:
+            terms = [
+                {"id": t.id, "shell": t.shell, "cwd": t.cwd, "created": t.created,
+                 "closed": t.closed, "exit_code": t.exit_code}
+                for t in self.terminals.values()
+            ]
+        return {"terminals": terms}
 
     def session_summaries(self, p: dict) -> dict:
         e = self._require_engine()

@@ -209,8 +209,8 @@ option { color: var(--text); background: var(--panel); }
 /* -------------------------------------------------------------- layout */
 #body { flex: 1; display: flex; min-height: 0; padding: 4px; }
 #left { width: 260px; min-width: 180px; flex: none; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); }
-#mid { flex: 1; display: flex; flex-direction: column; min-width: 120px; }
-#right { width: 520px; min-width: 260px; flex: none; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); }
+#mid { flex: 1; display: flex; flex-direction: column; min-width: 120px; min-height: 0; }
+#bottom { height: 240px; min-height: 120px; flex: none; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); }
 .splitter {
   flex: none;
   width: 2px;
@@ -236,8 +236,11 @@ body.resizing * { cursor: col-resize !important; }
 body.resizing-h { cursor: row-resize !important; user-select: none; }
 body.resizing-h * { cursor: row-resize !important; }
 
+/* main column: mid (chat) on top, bottom panel (activity/terminals) below */
+#main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
 /* tabs */
-#left-tabs, #right-tabs { display: flex; border-bottom: 1px solid var(--border); }
+#right-tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
 .tab {
   border: 1px solid transparent;
   border-bottom: none;
@@ -250,7 +253,48 @@ body.resizing-h * { cursor: row-resize !important; }
 .tab.active { background: var(--panel); border-color: var(--border); font-weight: bold; }
 .tabpage { flex: 1; min-height: 0; overflow-y: auto; }
 .hidden { display: none !important; }
-#left .tabpage { padding: 0; }
+
+/* left panel: vertical tab strip (VS Code style) + pages */
+#left-tabs {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+#left-tabs .tab {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 10px;
+  margin: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#left-tabs .tab.active { border-color: var(--border); background: var(--hover); }
+#left-pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#left-pages .tabpage { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+#left-pages .tabpage.hidden { display: none !important; }
+#tab-sessions { overflow: hidden; }
+#tab-sessions .list { flex: 1; overflow-y: auto; min-height: 0; }
+/* sessions tab: list view <-> chat view (chat opens on top of the list) */
+#session-list-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#session-list-view.hidden { display: none !important; }
+#session-chat-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#session-chat-view.hidden { display: none !important; }
+#chat-view-toolbar {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-bottom: 1px solid var(--row-border);
+}
+#chat-back-btn {
+  font-size: 14px; line-height: 1; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 3px;
+}
+#chat-view-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+#session-chat-view #chat { flex: 1; min-height: 0; }
 
 /* lists */
 .list { list-style: none; margin: 0; padding: 0; }
@@ -268,6 +312,34 @@ body.resizing-h * { cursor: row-resize !important; }
 .list li.current { font-weight: bold; }
 button.wide { margin: 4px; width: calc(100% - 8px); }
 
+/* terminals tab: list column + xterm pane */
+#bottom #tab-terminals { display: flex; overflow: hidden; padding: 0; }
+#term-list-col {
+  flex: none; width: 150px; min-width: 110px;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+#term-list-toolbar { display: flex; gap: 4px; padding: 4px; border-bottom: 1px solid var(--border); }
+#term-list-toolbar button { flex: 1; padding: 2px 0; font-size: 12px; }
+#term-list { flex: 1; overflow-y: auto; }
+/* hover-only close button on each terminal row */
+#term-list li { position: relative; }
+#term-list li .term-x {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 18px; height: 18px; margin: 0; padding: 0; line-height: 16px;
+  font-size: 11px; border-radius: 3px; opacity: 0;
+  transition: opacity 0.12s;
+}
+#term-list li:hover .term-x { opacity: 1; }
+#term-list li .term-x:hover { background: var(--close-hover); color: var(--error); }
+#term-pane { flex: 1; min-width: 0; min-height: 0; position: relative; background: #1e1e1e; }
+#term-pane .term-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #888; font-size: 12px;
+}
+#term-pane .xterm { position: absolute; inset: 4px; }
+#term-pane .xterm .xterm-viewport { overflow-anchor: auto; }
+
 /* --------------------------------------------------------------- chat */
 #chat {
   flex: 1;
@@ -280,19 +352,32 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
   line-height: 1.45;
 }
 #input-zone {
-  height: 130px;
-  min-height: 80px;
   flex: none;
+  height: 110px;
+  min-height: 70px;
   display: flex;
   flex-direction: column;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 8px;
 }
+/* drag handle above the input box: pull up to enlarge it */
+#input-resize {
+  flex: none;
+  height: 5px;
+  margin-top: -3px;
+  cursor: row-resize;
+  background: transparent;
+}
+#input-resize:hover, #input-resize.dragging { background: var(--splitter-hover); }
 #input {
   flex: 1;
   min-height: 0;
   resize: none;
   padding: 8px;
 }
-#send-row { display: flex; justify-content: flex-end; padding-top: 4px; gap: 8px; }
+#send-row { display: flex; justify-content: flex-end; padding-top: 4px; gap: 6px; }
+/* compact buttons in the send row */
+#send-row button { font-size: 11px; padding: 2px 8px; line-height: 1.3; }
 #attach-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 0; }
 .attach-item { position: relative; }
 .attach-item img {
@@ -356,8 +441,8 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 #chat .md a { color: var(--accent); }
 #chat .md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 
-/* log panes (right side) */
-#right .tabpage { padding: 8px 10px; }
+/* log panes (bottom panel) */
+#bottom .tabpage { padding: 8px 10px; }
 .log { white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
 
 /* ------------------------------------------------- file tree (left tab) */
@@ -387,9 +472,8 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 }
 .tree-err { padding: 4px 8px; color: var(--error); font-size: 11px; }
 
-/* ------------------------------------------------- diff view (mid pane) */
-#mid-tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
-#diff-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); }
+/* ------------------------------------------------- file viewer (mid pane) */
+#file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #diff-toolbar {
   display: flex; align-items: center; gap: 10px; flex: none;
   padding: 4px 8px; border-bottom: 1px solid var(--row-border);
@@ -398,6 +482,7 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 #diff-toolbar label { display: flex; align-items: center; gap: 4px; }
 #diff-toolbar select { max-width: 320px; }
 #diff-file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#diff-toggle-btn.diff-on { background: var(--fill); font-weight: bold; }
 #diff-body { flex: 1; min-height: 0; overflow: auto; background: var(--code-bg); padding: 4px 0; font-size: 12px; }
 .dline { display: flex; line-height: 1.45; }
 .dline .dno {

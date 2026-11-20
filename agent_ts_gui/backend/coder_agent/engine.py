@@ -81,6 +81,7 @@ class Engine:
         as image_url parts of the user message (needs a vision-capable model)."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
+        turn: Optional[Turn] = None
         try:
             self.cancel_event.clear()
             tt = self.task_types.get(task_type or self.task_types.detect(prompt))

@@ -28,6 +28,7 @@ const SUITES = {
   restart_close: "cdp_restart_close_test.cjs",
   remote: "cdp_remote_test.cjs",
   conn_switch: "cdp_conn_switch_test.cjs",
+  terminal: "cdp_terminal_test.cjs",
 };
 
 function pick() {
