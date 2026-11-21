@@ -249,8 +249,13 @@ class Server:
         """Thread-safe EventBus subscriber -> queued WebSocket send."""
         if self.ws is None or self.loop is None:
             return
-        payload = {"event": kind, "agent_id": agent_id, "data": _jsonable(data), "ts": time.time()}
-        asyncio.run_coroutine_threadsafe(self.send(payload), self.loop)
+        try:
+            payload = {"event": kind, "agent_id": agent_id, "data": _jsonable(data), "ts": time.time()}
+            asyncio.run_coroutine_threadsafe(self.send(payload), self.loop)
+        except RuntimeError:
+            # the event loop is already closed (server shutting down): drop the
+            # event rather than letting the bus subscriber kill the worker thread
+            pass
 
     def _on_bus_event(self, ev) -> None:
         """EventBus subscriber (fn(ev)) -> push_event."""

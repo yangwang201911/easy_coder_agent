@@ -65,6 +65,7 @@ def server_process(tmp_path, request):
     else:
         n_writes = int("".join(ch for ch in param if ch.isdigit()) or 1)
         fake_steer = param
+    block_n = int(fake_steer) if fake_steer else 0
     home = tmp_path / "home"
     project = tmp_path / "proj"
     project.mkdir()
@@ -143,7 +144,7 @@ def server_process(tmp_path, request):
     line = proc.stdout.readline().strip()
     assert line.startswith("WS_URL="), f"server failed to start: {line}\n{proc.stderr.read()}"
     url = line.split("=", 1)[1]
-    yield url, project, home
+    yield url, project, home, block_n
     proc.terminate()
     proc.wait(timeout=10)
 
@@ -205,7 +206,7 @@ class Client:
 
 
 def test_full_turn_with_approval(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -235,7 +236,7 @@ def test_full_turn_with_approval(server_process):
 
 
 def test_reject_approval_with_feedback(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -256,7 +257,7 @@ def test_reject_approval_with_feedback(server_process):
 def test_session_approve_all(server_process):
     """'Allow all in this session': one answer enables auto-approval for the rest
     of the session (deny rules still win); a new session resets it."""
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -309,7 +310,7 @@ def test_session_approve_all(server_process):
 
 
 @pytest.mark.parametrize("server_process", [(2, "1"), (2, "2")], indirect=True)
-def test_steer_while_running(server_process, request):
+def test_steer_while_running(server_process):
     """'Send while running': a steer sent while the agent is working is injected
     at the next safe point and the agent continues; the turn finishes normally.
     Param "1": the agent is mid-stream; the steer aborts the stream.
@@ -320,8 +321,7 @@ def test_steer_while_running(server_process, request):
     content chunk), so the test must steer only once the provider is known to be
     mid-stream (a content_delta has arrived) - otherwise the steer would land
     before the stream starts and the gate would be cleared after it was set."""
-    url, project, home = server_process
-    block_n = int(getattr(request, "param", (1, "1"))[1])
+    url, project, home, block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -355,7 +355,7 @@ def test_steer_while_running(server_process, request):
 
 
 def test_cancel_while_waiting_approval(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -372,7 +372,7 @@ def test_cancel_while_waiting_approval(server_process):
 
 
 def test_busy_guard_and_sessions(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -407,7 +407,7 @@ def test_turn_survives_disconnect(server_process):
     """Remote mode: the GUI drops the connection while a turn waits for an
     approval; the server must keep the turn alive, and re-ask the question
     when the GUI reconnects (open_project must not rebuild the engine)."""
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -438,7 +438,7 @@ def test_turn_survives_disconnect(server_process):
 
 
 def test_delete_sessions(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
