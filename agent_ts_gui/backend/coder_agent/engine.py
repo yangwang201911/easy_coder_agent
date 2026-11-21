@@ -54,6 +54,10 @@ class Engine:
         self.registry: ToolRegistry = default_registry()
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
+        # (cmd, cwd) -> (term_id, done_event, get_output, get_exit_code): run a command
+        # in a PTY terminal (GUI's run_command-in-terminal feature). Injected by the server.
+        self.command_runner: Optional[Callable[[str, str], tuple[str, threading.Event, Callable[[], str], Callable[[], int]]]] = None
+        self.close_terminal: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------- settings
     def apply_config(self, config: AppConfig) -> None:
@@ -98,6 +102,8 @@ class Engine:
                 snapshots=self.session.snapshots,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
+                command_runner=self.command_runner if self.config.agent.commands_in_terminal else None,
+                close_terminal=self.close_terminal,
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,

@@ -30,6 +30,7 @@ const SUITES = {
   remote: "cdp_remote_test.cjs",
   conn_switch: "cdp_conn_switch_test.cjs",
   terminal: "cdp_terminal_test.cjs",
+  termcmd: "cdp_termcmd_test.cjs",
   collapsible: "cdp_collapsible_test.cjs",
 };
 

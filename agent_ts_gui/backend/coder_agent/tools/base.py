@@ -30,6 +30,9 @@ class ToolContext:
     max_output_chars: int = 12000
     read_roots: list[Path] = field(default_factory=agent_read_roots)  # extra READ-only locations
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
+    # run cmd in a PTY terminal tab: (cmd, cwd) -> (term_id, done_event, get_output, get_exit_code)
+    command_runner: Optional[Callable[[str, str], tuple[str, threading.Event, Callable[[], str], Callable[[], int]]]] = None
+    close_terminal: Optional[Callable[[str], None]] = None  # kill a run_command PTY (timeout / cancel)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()

@@ -108,25 +108,42 @@ class Client:
         self.ws = ws
         self.next_id = 0
         self.events: list[dict] = []
+        self._lock = asyncio.Lock()  # one RPC in flight at a time (responses are matched by id)
 
     async def call(self, method: str, **params) -> dict:
-        self.next_id += 1
-        await self.ws.send(json.dumps({"id": self.next_id, "method": method, "params": params}))
-        while True:
-            msg = json.loads(await self.ws.recv())
+        async with self._lock:
+            self.next_id += 1
+            await self.ws.send(json.dumps({"id": self.next_id, "method": method, "params": params}))
+            while True:
+                msg = json.loads(await self.ws.recv())
+                if "event" in msg:
+                    self.events.append(msg)
+                    continue
+                assert msg.get("id") == self.next_id, msg
+                if "error" in msg:
+                    raise AssertionError(f"{method} failed: {msg['error']}")
+                return msg["result"]
+
+    async def wait_output(self, needle: str, timeout: float = 15.0) -> str:
+        """Drain the socket until ``needle`` appears in the terminal_output events."""
+        deadline = time.time() + timeout
+        out = "".join(e["data"].get("text", "") for e in self.events if e["event"] == "terminal_output")
+        while needle not in out and time.time() < deadline:
+            try:
+                msg = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=0.5))
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
             if "event" in msg:
                 self.events.append(msg)
-                continue
-            assert msg.get("id") == self.next_id, msg
-            if "error" in msg:
-                raise AssertionError(f"{method} failed: {msg['error']}")
-            return msg["result"]
+                out = "".join(e["data"].get("text", "")
+                              for e in self.events if e["event"] == "terminal_output")
+        return out
 
-    async def wait_event(self, kind: str, timeout: float = 15.0) -> dict:
+    async def wait_event(self, kind: str, timeout: float = 15.0, match=None) -> dict:
         deadline = time.time() + timeout
         while time.time() < deadline:
             for i, ev in enumerate(self.events):
-                if ev["event"] == kind:
+                if ev["event"] == kind and (match is None or match(ev)):
                     return self.events.pop(i)
             # drain whatever is already queued
             try:
@@ -183,6 +200,40 @@ def test_reject_approval_with_feedback(server_process):
             fin = await c.wait_event("turn_finished")
             assert fin["data"]["status"] == "done"  # the model gets the feedback and stops
             assert not (project / "hello.txt").exists()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_command_pty(server_process):
+    """run_command-in-terminal: a one-shot PTY terminal, command_in_terminal
+    event, live output, exit code and interactive stdin."""
+    url, project, home = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+
+            # 1) simple command: event + output + exit code
+            r = await c.call("terminal_command", command="echo cdp-pty-out && echo $((1+1))")
+            ev = await c.wait_event("command_in_terminal", match=lambda e: e["data"]["id"] == r["id"])
+            assert ev["data"]["id"] == r["id"]
+            assert "cdp-pty-out" in ev["data"]["command"]
+            out = await c.wait_output("cdp-pty-out")
+            assert "2" in out, out
+            assert (await c.call("terminal_exit", id=r["id"]))["exit_code"] == 0
+
+            # 2) failing command: non-zero exit code
+            r2 = await c.call("terminal_command", command="exit 3")
+            assert (await c.call("terminal_exit", id=r2["id"]))["exit_code"] == 3
+
+            # 3) interactive stdin: the user can type into the command
+            r3 = await c.call("terminal_command", command="read line && echo got:$line")
+            ev3 = await c.wait_event("command_in_terminal", match=lambda e: e["data"]["id"] == r3["id"])
+            await asyncio.sleep(0.3)  # let `read` start
+            await c.call("terminal_write", id=ev3["data"]["id"], data="hello\r")
+            out3 = await c.wait_output("got:hello")
+            assert (await c.call("terminal_exit", id=r3["id"]))["exit_code"] == 0
 
     asyncio.run(scenario())
 

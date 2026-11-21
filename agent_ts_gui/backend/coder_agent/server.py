@@ -41,7 +41,7 @@ from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
-from .terminal import Terminal, open_terminal
+from .terminal import Terminal, open_terminal, open_terminal_command
 
 ProviderFactory = Optional[Callable[[], LLMProvider]]  # injectable for tests
 
@@ -172,6 +172,7 @@ class Server:
         self.terminals: dict[str, Terminal] = {}
         self._terminals_lock = threading.Lock()
         self._term_seq = 0
+        self._term_waits: dict[str, tuple[threading.Event, Callable[[], int]]] = {}  # command terminals: (done, get_exit_code)
         self._methods: dict[str, Callable[..., Any]] = self._register()
 
     # ------------------------------------------------------------- plumbing
@@ -214,6 +215,8 @@ class Server:
             "file_content": self.file_content,
             "turn_file_original": self.turn_file_original,
             "terminal_open": self.terminal_open,
+            "terminal_command": self.terminal_command,  # test hook: one-shot PTY + command_in_terminal event
+            "terminal_exit": self.terminal_exit,  # test hook: await a command terminal's exit
             "terminal_write": self.terminal_write,
             "terminal_resize": self.terminal_resize,
             "terminal_close": self.terminal_close,
@@ -316,6 +319,8 @@ class Server:
         if self._unsubscribe is not None:
             self._unsubscribe()
         self.engine = Engine(cfg, root, EventBus(), approver=None, session=session)
+        self.engine.command_runner = self._open_command_terminal
+        self.engine.close_terminal = self._close_terminal
         self.bus = self.engine.bus
         self.approvals = ApprovalAsk(self)
         self.plans = PlanAsk(self)
@@ -560,17 +565,95 @@ class Server:
         cols = int(p.get("cols") or 80)
         rows = int(p.get("rows") or 24)
         cwd = p.get("cwd") or (str(self.root) if self.root else None)
-        term = open_terminal(term_id, shell=p.get("shell"), cwd=cwd, cols=cols, rows=rows)
+        command = p.get("command") or ""
+        if command:
+            term = open_terminal_command(term_id, command, cwd=cwd, cols=cols, rows=rows)
+        else:
+            term = open_terminal(term_id, shell=p.get("shell"), cwd=cwd, cols=cols, rows=rows)
         # push_event is (kind, agent_id, data); the terminal only knows kind+data
         term.start(lambda kind, data: self.push_event(kind, "terminal", data))
         # drop finished terminals from the registry (the GUI keeps its own copy)
         term.on_exit = lambda t: self.terminals.pop(t.id, None)
         with self._terminals_lock:
             self.terminals[term_id] = term
-        return {"id": term_id, "shell": term.shell, "cwd": term.cwd, "cols": cols, "rows": rows}
+        return {"id": term_id, "shell": term.shell, "cwd": term.cwd,
+                "cols": cols, "rows": rows, "command": term.command}
+
+    def terminal_command(self, p: dict) -> dict:
+        """Test hook: run a one-shot command in a PTY terminal (same path as the
+        agent's run_command tool). Non-blocking; use ``terminal_exit`` to await.
+
+        The tool path goes through Engine.command_runner; this RPC exercises the
+        same ``_open_command_terminal`` so the GUI's command_in_terminal handling
+        can be tested without a live LLM.
+        """
+        term_id, done, get_output, get_exit_code = self._open_command_terminal(
+            p["command"], p.get("cwd") or (str(self.root) if self.root else None))
+        with self._terminals_lock:
+            self._term_waits[term_id] = (done, get_exit_code)
+        return {"id": term_id}
+
+    def terminal_exit(self, p: dict) -> dict:
+        """Await a one-shot command terminal's exit and return its exit code."""
+        with self._terminals_lock:
+            w = self._term_waits.pop(p["id"], None)
+        if w is None:
+            raise RuntimeError(f"no such command terminal {p['id']!r}")
+        done, get_exit_code = w
+        done.wait(timeout=int(p.get("timeout") or 60))
+        return {"exit_code": get_exit_code()}
+
+    def _open_command_terminal(self, command: str, cwd: str) -> tuple[str, threading.Event, Callable[[], str], Callable[[], int]]:
+        """Open a one-shot PTY terminal running ``command`` (Engine.command_runner).
+
+        Returns ``(term_id, done, get_output, get_exit_code)``; ``done`` is set
+        when the command exits. The GUI learns about the terminal via the
+        ``command_in_terminal`` event.
+        """
+        with self._terminals_lock:
+            self._term_seq += 1
+            term_id = f"term-{self._term_seq}"
+        term = open_terminal_command(term_id, command, cwd=cwd or None, cols=120, rows=30)
+        buf: list[str] = []
+        total = 0
+        lock = threading.Lock()
+
+        def sink(text: str) -> None:
+            nonlocal total
+            with lock:
+                if total < 20000:
+                    buf.append(text)
+                    total += len(text)
+
+        def on_exit(t: Terminal) -> None:
+            # command terminals stay in the registry after exit: the GUI keeps
+            # showing their final output and the user may still type (harmless)
+            # until the tab is closed
+            pass
+
+        term.on_output = sink
+        term.start(lambda kind, data: self.push_event(kind, "terminal", data))
+        term.on_exit = on_exit
+        with self._terminals_lock:
+            self.terminals[term_id] = term
+        self.push_event("command_in_terminal", "terminal",
+                        {"id": term_id, "command": command, "cwd": term.cwd})
+        # term.exit_code is set by the reader thread's _reap() before done.set()
+        return term_id, term.done, (lambda: "".join(buf)), (lambda: term.exit_code if term.exit_code is not None else -1)
+
+    def _close_terminal(self, term_id: str) -> None:
+        """Kill a run_command PTY (timeout / user cancel from the tool)."""
+        with self._terminals_lock:
+            t = self.terminals.pop(term_id, None)
+            self._term_waits.pop(term_id, None)
+        if t is not None:
+            t.close()
 
     def terminal_write(self, p: dict) -> dict:
-        self._term(p["id"]).write(p.get("data") or "")
+        t = self._term(p["id"])
+        if t.closed:
+            return {"ok": False, "error": "terminal has exited"}  # late keystroke after the command finished
+        t.write(p.get("data") or "")
         return {"ok": True}
 
     def terminal_resize(self, p: dict) -> dict:
@@ -580,6 +663,7 @@ class Server:
     def terminal_close(self, p: dict) -> dict:
         with self._terminals_lock:
             t = self.terminals.pop(p["id"], None)
+            self._term_waits.pop(p["id"], None)
         if t is None:
             return {"ok": True}  # already gone (exited)
         t.close()
@@ -589,7 +673,7 @@ class Server:
         with self._terminals_lock:
             terms = [
                 {"id": t.id, "shell": t.shell, "cwd": t.cwd, "created": t.created,
-                 "closed": t.closed, "exit_code": t.exit_code}
+                 "closed": t.closed, "exit_code": t.exit_code, "command": t.command}
                 for t in self.terminals.values()
             ]
         return {"terminals": terms}

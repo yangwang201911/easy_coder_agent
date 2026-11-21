@@ -111,6 +111,8 @@ class Orchestrator:
                 agent_id=aid,
                 max_output_chars=self.cfg.context.tool_output_max_chars,
                 extra_roots=e.policy.extra_roots,
+                command_runner=e.command_runner if self.cfg.agent.commands_in_terminal else None,
+                close_terminal=e.close_terminal,
             )
             agent = Agent(
                 aid, self.provider, registry, tool_ctx, e.policy, e.approver,

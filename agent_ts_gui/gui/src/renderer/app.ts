@@ -212,6 +212,8 @@ function call(method: string, params: Record<string, any> = {}, opts: { waitRead
     } else send();
   });
 }
+// exposed for automated UI tests (CDP)
+(window as any).__call = call;
 
 // ------------------------------------------------------------------- status
 const STATE_TEXT: Record<string, string> = {
@@ -1229,6 +1231,7 @@ const SETTINGS_TIPS: Record<string, string> = {
   compress_threshold: "Compress when usage reaches this fraction (0.95 = 95%)",
   compress_target: "Compress down to this fraction",
   parallelism: "Concurrent sub-agents. Keep 1 for a single-GPU Ollama.",
+  commands_in_terminal: "Run agent commands in the Terminals panel (live I/O; you can type into them). Off = classic pipe execution.",
   bypass_proxy: "Ignore HTTP(S)_PROXY environment variables (LAN server)",
   planner_thinking: "Allow thinking while planning (slower)",
   doc_analysis: "Summarise relevant MODULE.md files before each subtask",
@@ -1910,6 +1913,8 @@ function onEvent(ev: AgentEvent) {
     }
   } else if (k === "command_output") {
     commands.write(d.text ?? "", "", true);
+  } else if (k === "command_in_terminal") {
+    onCommandInTerminal(d);
   } else if (k === "terminal_output" || k === "terminal_exited") {
     onTermEvent(k, d);
   } else if (k === "status") {
@@ -2086,7 +2091,9 @@ function switchLeftTab(name: string) {
 const S_TERM = {
   // ready=false until the terminal_open RPC answered: keystrokes typed in the
   // meantime are buffered and flushed, so nothing is written to a dead id
-  terms: new Map<string, { x: XTerm; fit: FitAddon; closed: boolean; shell: string; ready: boolean; pending: string[] }>(),
+  // command!="" marks a one-shot agent run_command terminal (created by the
+  // backend via the command_in_terminal event, not by the user's ＋ button)
+  terms: new Map<string, { x: XTerm; fit: FitAddon; closed: boolean; shell: string; ready: boolean; pending: string[]; command: string }>(),
   current: null as string | null,
 };
 
@@ -2099,7 +2106,10 @@ function renderTermList() {
   for (const [id, t] of S_TERM.terms) {
     const li = document.createElement("li");
     const label = document.createElement("span");
-    label.textContent = `${id}${t.closed ? " (exited)" : ""}`;
+    label.title = t.command ? `agent command: ${t.command}` : "user terminal";
+    const name = t.command ? `agent: ${short(t.command, 24)}` : id;
+    label.textContent = `${name}${t.closed ? " (exited)" : ""}`;
+    if (t.command) label.classList.add("term-agent");
     li.appendChild(label);
     // close button: visible only while the row is hovered (see .term-x in CSS)
     const x = document.createElement("button");
@@ -2157,7 +2167,9 @@ function closeTerminal(id: string) {
   showTermPane(S_TERM.current);
 }
 
-async function openTerminal() {
+// create an xterm.js instance in the terminal pane, register it under ``id``
+// and bind input/resize to the backend. Returns the instance (for disposal).
+function createTermX(id: string, ready: boolean, command: string) {
   const pane = termPaneEl();
   const x = new XTerm({
     cursorBlink: true,
@@ -2170,37 +2182,50 @@ async function openTerminal() {
   x.open(pane);
   (x.element as HTMLElement).style.display = "none";
   (x.element as any).__xterm = x;  // CDP test hook
-  const id = `term-${Date.now().toString(36)}`;  // placeholder until the RPC answers
-  S_TERM.terms.set(id, { x, fit, closed: false, shell: "", ready: false, pending: [] });
-  const bind = (tid: string) => ({
-    data: x.onData((data) => {
-      const rec = S_TERM.terms.get(tid);
-      if (!rec) return;
-      if (!rec.ready) { rec.pending.push(data); return; }  // RPC still in flight
-      call("terminal_write", { id: tid, data });
-    }),
-    resize: x.onResize(({ cols, rows }) => call("terminal_resize", { id: tid, cols, rows })),
+  S_TERM.terms.set(id, { x, fit, closed: false, shell: "", ready, pending: [], command });
+  x.onData((data) => {
+    const rec = S_TERM.terms.get(id);
+    if (!rec) return;
+    if (!rec.ready) { rec.pending.push(data); return; }  // RPC still in flight
+    call("terminal_write", { id, data });
   });
-  const h = bind(id);
+  x.onResize(({ cols, rows }) => call("terminal_resize", { id, cols, rows }));
+  return x;
+}
+
+async function openTerminal() {
+  const id = `term-${Date.now().toString(36)}`;  // placeholder until the RPC answers
+  createTermX(id, false, "");
   renderTermList();  // show the pending entry immediately
 
-  const r = await call("terminal_open", { cols: x.cols, rows: x.rows, cwd: S.root ?? undefined });
+  const r = await call("terminal_open", { cols: 80, rows: 24, cwd: S.root ?? undefined });
   if (r?.__error) {
-    h.data.dispose(); h.resize.dispose();
-    x.dispose();
+    const t = S_TERM.terms.get(id);
+    t?.x.dispose();
     S_TERM.terms.delete(id);
     chat.line(`\n[terminal] ${r.__error}`, "c-error");
     renderTermList();
     return;
   }
   const real = r.id as string;
-  h.data.dispose(); h.resize.dispose();  // replace the placeholder-id handlers
-  const pending = S_TERM.terms.get(id)?.pending ?? [];
+  const t = S_TERM.terms.get(id);
+  const pending = t?.pending ?? [];
   S_TERM.terms.delete(id);
-  S_TERM.terms.set(real, { x, fit, closed: false, shell: r.shell ?? "", ready: true, pending: [] });
-  bind(real);
+  if (t) t.x.dispose();
+  createTermX(real, true, "");
+  const rec = S_TERM.terms.get(real)!;
+  rec.shell = r.shell ?? "";
   for (const data of pending) call("terminal_write", { id: real, data });  // flush early keystrokes
   selectTerminal(real);
+}
+
+// the agent's run_command opened a one-shot PTY on the backend: attach a local
+// xterm.js to it (the backend already runs the command) and show the tab
+function onCommandInTerminal(d: Record<string, any>) {
+  const id = d.id as string;
+  if (S_TERM.terms.has(id)) return;
+  createTermX(id, true, String(d.command ?? ""));
+  selectTerminal(id);
 }
 
 function onTermEvent(k: string, d: Record<string, any>) {

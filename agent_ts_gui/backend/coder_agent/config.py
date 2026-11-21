@@ -55,6 +55,7 @@ class ContextConfig(BaseModel):
 class AgentConfig(BaseModel):
     max_steps: int = 120
     parallelism: int = 1  # concurrent sub-agents (1 for single-GPU Ollama)
+    commands_in_terminal: bool = True  # run_command executes in a PTY terminal tab (live I/O, user can type)
     loop_limit: int = 3  # identical tool calls tolerated before intervening
     auto_skills: bool = True  # inject skills whose `triggers` match a failing command's output
     failure_hint_after: int = 2  # consecutive failed commands before the "list suspects" nudge (0 = off)

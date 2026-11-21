@@ -17,6 +17,7 @@ turn_started        turn_id
 turn_finished       turn_id, status
 agent_finished      status, steps
 warning / error     text
+command_in_terminal id, command, cwd  (a run_command PTY terminal was opened)
 """
 
 from __future__ import annotations
