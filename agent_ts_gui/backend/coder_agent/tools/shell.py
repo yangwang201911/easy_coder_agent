@@ -1,10 +1,4 @@
-"""Shell command tool with timeout, cancellation and streamed output.
-
-By default the command runs in a PTY terminal (``ctx.command_runner``): the GUI
-shows live I/O in a terminal tab and the user can type into the command's stdin.
-Without a runner (CLI / ``commands_in_terminal = false``) it falls back to the
-classic pipe-based execution.
-"""
+"""Shell command tool with timeout, cancellation and streamed output."""
 
 from __future__ import annotations
 
@@ -40,41 +34,9 @@ def run_command(ctx: ToolContext, a: dict) -> str:
         raise ToolError("empty command")
     timeout = max(1, min(int(a.get("timeout", DEFAULT_TIMEOUT)), MAX_TIMEOUT))
     cwd = ctx.resolve(a.get("cwd", ".")).as_posix()
-    if ctx.command_runner is not None:
-        return _run_in_terminal(ctx, cmd, cwd, timeout)
     return _run_piped(ctx, cmd, cwd, timeout)
 
 
-# --------------------------------------------------------------- PTY terminal
-def _run_in_terminal(ctx: ToolContext, cmd: str, cwd: str, timeout: int) -> str:
-    """Run ``cmd`` in a PTY terminal tab; return the classic result text."""
-    term_id, done, get_output, get_exit_code = ctx.command_runner(cmd, cwd)  # type: ignore[misc]
-    deadline = time.monotonic() + timeout
-    status = ""
-    while not done.is_set():
-        if ctx.cancel.is_set():
-            if ctx.close_terminal:
-                ctx.close_terminal(term_id)
-            status = "cancelled by user"
-            break
-        if time.monotonic() > deadline:
-            if ctx.close_terminal:
-                ctx.close_terminal(term_id)
-            status = f"timed out after {timeout}s and was killed"
-            break
-        done.wait(timeout=0.2)
-    out = truncate_middle(get_output(), KEEP_CHARS * 2)
-    code = -1
-    for _ in range(20):  # on_exit (which records the exit code) may lag done.set()
-        code = get_exit_code()
-        if code != -1:
-            break
-        time.sleep(0.05)
-    head = f"exit code: {code}" + (f" ({status})" if status else "")
-    return f"{head}\n{out}".rstrip()
-
-
-# ------------------------------------------------------------------ pipe mode
 def _run_piped(ctx: ToolContext, cmd: str, cwd: str, timeout: int) -> str:
     env = dict(os.environ, TERM="dumb", NO_COLOR="1", PAGER="cat", GIT_PAGER="cat")
     proc = subprocess.Popen(
@@ -146,9 +108,8 @@ def shell_tools() -> list[Tool]:
     return [
         Tool(
             "run_command",
-            "Run a shell command (bash) in the project. The command runs in the GUI's "
-            "terminal panel (live output; the user can type into it). Use for building "
-            "(cmake), tests, git status etc. Output is truncated if very long.",
+            "Run a shell command (bash) in the project. Use for building (cmake), "
+            "tests, git status etc. Output is truncated if very long.",
             {
                 "type": "object",
                 "properties": {

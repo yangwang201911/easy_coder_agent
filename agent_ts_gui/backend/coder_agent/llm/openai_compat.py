@@ -97,6 +97,7 @@ class OpenAICompatProvider(LLMProvider):
         cancel: Optional[threading.Event] = None,
         thinking: Optional[bool] = None,
         max_tokens: Optional[int] = None,
+        steer: Optional[threading.Event] = None,
     ) -> Iterator[LLMChunk]:
         # A text-only model (e.g. Ollama without a vision projector) answers
         # 500 "image input is not supported" - fail fast with an actionable
@@ -120,7 +121,7 @@ class OpenAICompatProvider(LLMProvider):
         finish: Optional[str] = None
         try:
             for chunk in stream:
-                if cancel is not None and cancel.is_set():
+                if (cancel is not None and cancel.is_set()) or (steer is not None and steer.is_set()):
                     raise LLMCancelled()
                 if getattr(chunk, "usage", None):
                     u = chunk.usage

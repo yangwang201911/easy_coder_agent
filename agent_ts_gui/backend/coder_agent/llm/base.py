@@ -50,11 +50,14 @@ class LLMProvider(ABC):
         cancel: Optional[threading.Event] = None,
         thinking: Optional[bool] = None,
         max_tokens: Optional[int] = None,
+        steer: Optional[threading.Event] = None,
     ) -> Iterator[LLMChunk]:
         """Stream a chat completion.
 
         ``thinking=False`` forces thinking off for this call (used for
         summaries and for retrying after an over-long thinking phase).
+        ``steer``, when given, aborts the stream (LLMCancelled) as soon as it
+        is set: the user sent a new message while the model was streaming.
         """
 
     def complete(

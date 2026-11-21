@@ -54,10 +54,10 @@ class Engine:
         self.registry: ToolRegistry = default_registry()
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
-        # (cmd, cwd) -> (term_id, done_event, get_output, get_exit_code): run a command
-        # in a PTY terminal (GUI's run_command-in-terminal feature). Injected by the server.
-        self.command_runner: Optional[Callable[[str, str], tuple[str, threading.Event, Callable[[], str], Callable[[], int]]]] = None
-        self.close_terminal: Optional[Callable[[str], None]] = None
+        # Steer: the user sends a new message while a turn is running. The agent
+        # loop picks it up at the next safe point (top of step) and continues.
+        self._steer_event = threading.Event()
+        self._steer_prompt: str = ""
 
     # ------------------------------------------------------------- settings
     def apply_config(self, config: AppConfig) -> None:
@@ -71,6 +71,19 @@ class Engine:
 
     def cancel(self) -> None:
         self.cancel_event.set()
+
+    def steer(self, prompt: str) -> None:
+        """Queue a user message for the running turn (the GUI's "send while running").
+
+        The agent loop injects it at the next safe point: immediately if the
+        model is not streaming (a tool is running / it is between steps), or as
+        soon as the current stream is aborted (a command is running: the model
+        is not mid-stream, the steer is picked up at the top of the next step).
+        Raises RuntimeError if no turn is running."""
+        if not self._lock.locked():
+            raise RuntimeError("no turn is running")
+        self._steer_prompt = prompt
+        self._steer_event.set()
 
     # ----------------------------------------------------------------- run
     def submit(
@@ -88,6 +101,8 @@ class Engine:
         turn: Optional[Turn] = None
         try:
             self.cancel_event.clear()
+            self._steer_event.clear()
+            self._steer_prompt = ""
             tt = self.task_types.get(task_type or self.task_types.detect(prompt))
             turn = self.session.new_turn(prompt, tt.name, images)
             self.session.save()
@@ -102,12 +117,11 @@ class Engine:
                 snapshots=self.session.snapshots,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
-                command_runner=self.command_runner if self.config.agent.commands_in_terminal else None,
-                close_terminal=self.close_terminal,
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,
                 self.ctx_mgr, self.bus, self.config.agent, self.config.thinking, self.cancel_event,
+                steer=self._steer_event, steer_prompt=lambda: self._steer_prompt,
             )
             system = PromptBuilder(self.root, self.task_types, self.sections).build(tt)
             messages = [{"role": "system", "content": system}, *self.session.build_messages()]

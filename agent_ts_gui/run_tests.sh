@@ -36,7 +36,7 @@ run_gui() { # $1 = cdp test file name (without .cjs)
 case "$target" in
   backend) run_backend ;;
   gui)
-    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal termcmd collapsible; do
+    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal copy collapsible; do
       run_gui "$t"
     done
     ;;
@@ -46,7 +46,7 @@ case "$target" in
     ;;
   all)
     run_backend
-    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal termcmd collapsible; do
+    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal copy collapsible; do
       run_gui "$t"
     done
     ;;

@@ -2,6 +2,7 @@ Qwen
 vllm-env
 *.log
 *.pid
+server/mmproj/*.gguf
 nohup.out
 unsloth
 Modelfile

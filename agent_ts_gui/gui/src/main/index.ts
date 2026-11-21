@@ -337,6 +337,50 @@ app.whenReady().then(() => {
     }
     return out;
   });
+  // ------------------------------------------------- web page capture
+  // A hidden BrowserWindow renders local web pages so the user can screenshot
+  // them into the chat (capturePage cannot see into iframes of the main window).
+  let captureWin: BrowserWindow | null = null;
+  function captureWindow(): BrowserWindow {
+    if (!captureWin || captureWin.isDestroyed()) {
+      captureWin = new BrowserWindow({
+        show: false,
+        width: 1280,
+        height: 900,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: false },
+      });
+      captureWin.webContents.setAudioMuted(true);
+      captureWin.on("closed", () => { captureWin = null; });
+    }
+    return captureWin;
+  }
+  ipcMain.handle("web-capture", async (_e, url: string): Promise<{ data_url?: string; error?: string }> => {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return { error: `only http(s) urls are supported, got '${u.protocol}'` };
+    } catch (e: any) {
+      return { error: `invalid url: ${e?.message ?? e}` };
+    }
+    const win = captureWindow();
+    const done = new Promise<null>((res) => {
+      const t = setTimeout(() => res(null), 15000);
+      win.webContents.once("did-finish-load", () => { clearTimeout(t); res(null); });
+      win.webContents.once("did-fail-load", (_e2, code, desc) => { clearTimeout(t); (win as any).__loadErr = `${desc} (${code})`; res(null); });
+    });
+    (win as any).__loadErr = null;
+    win.loadURL(url).catch((e) => { (win as any).__loadErr = String(e?.message ?? e); });
+    await done;
+    const loadErr = (win as any).__loadErr as string | null;
+    if (loadErr) return { error: `page failed to load: ${loadErr}` };
+    await new Promise((r) => setTimeout(r, 400)); // let fonts / layout settle
+    const shot = await win.webContents.capturePage();
+    // downscale to keep the payload (and the model's token cost) small
+    const maxEdge = 1568;
+    const b = shot.getSize();
+    const scale = Math.min(1, maxEdge / Math.max(b.width, b.height));
+    const img = scale < 1 ? shot.resize({ width: Math.round(b.width * scale), height: Math.round(b.height * scale) }) : shot;
+    return { data_url: `data:image/png;base64,${img.toPNG().toString("base64")}` };
+  });
   ipcMain.handle("read-file", (_e, p: string): { content?: string; error?: string } => {
     try {
       const buf = fs.readFileSync(p);

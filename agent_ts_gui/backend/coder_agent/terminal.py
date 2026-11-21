@@ -28,15 +28,12 @@ class Terminal:
     pid: int
     shell: str
     cwd: str
-    command: str = ""  # non-empty: a one-shot `bash -c <command>` (agent run_command)
     created: float = field(default_factory=time.time)
     cols: int = 80
     rows: int = 24
     closed: bool = False
     exit_code: Optional[int] = None
     on_exit: Optional[Callable[["Terminal"], None]] = field(default=None, repr=False)
-    on_output: Optional[Callable[[str], None]] = field(default=None, repr=False)  # per-chunk output sink
-    done: threading.Event = field(default_factory=threading.Event, repr=False)  # set once the child is reaped
     _thread: Optional[threading.Thread] = field(default=None, repr=False)
 
     # ------------------------------------------------------------- lifecycle
@@ -62,13 +59,7 @@ class Terminal:
                 except OSError:
                     break
                 if data:
-                    text = data.decode("utf-8", "replace")
-                    push("terminal_output", {"id": self.id, "text": text})
-                    if self.on_output:
-                        try:
-                            self.on_output(text)
-                        except Exception:  # noqa: BLE001 - sink must not kill the reader
-                            pass
+                    push("terminal_output", {"id": self.id, "text": data.decode("utf-8", "replace")})
             if self._reap():  # child exited
                 break
         # drain remaining output (exit messages, final prompt)
@@ -88,7 +79,6 @@ class Terminal:
             if self._reap():
                 break
             time.sleep(0.05)
-        self.done.set()
         if not self.closed:
             self.closed = True
             push("terminal_exited", {"id": self.id, "exit_code": self.exit_code})
@@ -128,7 +118,6 @@ class Terminal:
         if self.closed:
             return
         self.closed = True
-        self.done.set()
         try:
             os.close(self.master_fd)
         except OSError:
@@ -164,28 +153,4 @@ def open_terminal(term_id: str, shell: Optional[str] = None,
     term = Terminal(id=term_id, master_fd=master_fd, pid=pid, shell=shell,
                     cwd=cwd or "", cols=cols, rows=rows)
     term.resize(cols, rows)  # the forked child may not have read the size yet
-    return term
-
-
-def open_terminal_command(term_id: str, command: str,
-                          cwd: Optional[str] = None, cols: int = 80, rows: int = 24) -> Terminal:
-    """Fork a one-shot ``bash -c <command>`` on a new PTY.
-
-    Used by the agent's run_command tool: the GUI shows the live I/O in a
-    terminal tab and the user can type into the command's stdin. The child
-    exits when the command finishes; use ``done`` / ``exit_code`` to await it.
-    """
-    shell = "/bin/bash" if os.path.exists("/bin/bash") else (os.environ.get("SHELL") or "/bin/sh")
-    pid, master_fd = pty.fork()
-    if pid == 0:  # child: become the command, then exec it
-        try:
-            if cwd:
-                os.chdir(cwd)
-        except OSError:
-            pass
-        os.execvpe(shell, [shell, "-c", command], os.environ)
-        os._exit(127)  # exec failed
-    term = Terminal(id=term_id, master_fd=master_fd, pid=pid, shell=shell,
-                    command=command, cwd=cwd or "", cols=cols, rows=rows)
-    term.resize(cols, rows)
     return term

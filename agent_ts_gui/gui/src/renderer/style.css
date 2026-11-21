@@ -335,8 +335,6 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 }
 #term-list li:hover .term-x { opacity: 1; }
 #term-list li .term-x:hover { background: var(--close-hover); color: var(--error); }
-/* one-shot agent run_command terminals are marked in the list */
-#term-list li .term-agent { color: var(--accent, #4da6ff); }
 #term-pane { flex: 1; min-width: 0; min-height: 0; position: relative; background: #1e1e1e; }
 #term-pane .term-empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -649,6 +647,31 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
   color: var(--text-faint); user-select: none; border-right: 1px solid var(--row-border);
 }
 .fline .ftext { white-space: pre; padding-left: 8px; }
+.ftab .ftab-ico { flex: none; font-size: 12px; }
+/* web page pane: a thin url bar over a full-height iframe */
+.webbar {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 4px 10px; background: var(--panel);
+  border-bottom: 1px solid var(--row-border); font-size: 12px;
+}
+.webbar-url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); }
+.webbar-btn {
+  flex: none; border: 1px solid var(--border); background: var(--panel); color: var(--text-soft);
+  border-radius: 8px; padding: 1px 8px; font-size: 11px; cursor: pointer; text-decoration: none;
+}
+.webbar-btn:hover { color: var(--text); border-color: var(--text-soft); }
+.webframe-wrap { flex: 1; min-height: 0; }
+.webframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+#file-body:has(.webframe) { padding: 0; overflow: hidden; }
+/* url input in the Files toolbar */
+#web-url-input {
+  flex: none; width: 180px; margin: 0 4px; padding: 2px 6px;
+  font-size: 11px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+#web-url-input::placeholder { color: var(--text-faint); }
+#web-open-btn { flex: none; border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 0 6px; cursor: pointer; font-size: 12px; }
+#web-open-btn:hover { border-color: var(--text-soft); }
 
 /* spans */
 .c-user { color: var(--user); font-weight: bold; }

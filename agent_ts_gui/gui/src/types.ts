@@ -25,6 +25,7 @@ export interface Api {
   pickDirectory: () => Promise<string | null>;
   pickFiles: () => Promise<string[]>;
   pickImages: () => Promise<{ name: string; data_url: string }[]>;
+  webCapture: (url: string) => Promise<{ data_url?: string; error?: string }>;
   readFile: (p: string) => Promise<{ content?: string; error?: string }>;
   getLastProject: () => Promise<string | null>;
   setLastProject: (p: string) => Promise<void>;

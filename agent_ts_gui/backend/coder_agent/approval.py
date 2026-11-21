@@ -38,6 +38,7 @@ class ApprovalResponse:
     feedback: str = ""  # sent back to the model when rejected
     remember_rule: str = ""  # add to policy when non-empty
     remember_scope: str = "project"  # project | user
+    session_approve: bool = False  # allow everything (not denied) for the rest of this session
 
 
 # --------------------------------------------------------------- shell split
@@ -271,6 +272,9 @@ class ApprovalPolicy:
         # Resolved trusted dirs outside the root. Mutated in place: ToolContext shares this list so the
         # file tools may touch these paths (after the policy said yes).
         self.extra_roots: list[Path] = []
+        # Session-scoped auto-approval ("allow all in this session"): set by the GUI,
+        # lives only in this process - it is NOT persisted to the policy files.
+        self.session_approve = False
         self._refresh_roots()
 
     @classmethod
@@ -385,8 +389,8 @@ class ApprovalPolicy:
             for rule in cfg.get("deny", []):
                 if toks and _prefix_match(toks, rule):
                     return Decision("deny", f"matches deny rule '{rule}'")
-        if self.data.get("auto_approve_all"):
-            return Decision("allow", "auto_approve_all")
+        if self.data.get("auto_approve_all") or self.session_approve:
+            return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
         if unsafe:
             return Decision("ask", f"contains {unsafe}")
 
@@ -438,8 +442,8 @@ class ApprovalPolicy:
         for g in cfg.get("deny", []):
             if any(fnmatch.fnmatch(n, g) for n in names):
                 return Decision("deny", f"matches deny pattern '{g}'")
-        if self.data.get("auto_approve_all"):
-            return Decision("allow", "auto_approve_all")
+        if self.data.get("auto_approve_all") or self.session_approve:
+            return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
         if abs_p is not None and self._protected(abs_p):
             return Decision("ask", "this is the approval policy file")
         for g in cfg.get("allow", []):

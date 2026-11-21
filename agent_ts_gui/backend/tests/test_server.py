@@ -31,7 +31,7 @@ class FakeProvider:
             {"content": "all done"},
         ]
 
-    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None):
+    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None, steer=None):
         from coder_agent.llm import LLMChunk, ToolCall, Usage
         reply = self.script.pop(0) if self.script else {"content": "done"}
         if reply.get("content"):
@@ -48,8 +48,23 @@ class FakeProvider:
 
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def server_process(tmp_path, monkeypatch):
-    """Start the server with the fake provider and yield (url, proc)."""
+def server_process(tmp_path, request):
+    """Start the server with the fake provider and yield (url, proc).
+
+    ``request.param`` (optional) is a string: leading digits set how many
+    write_file calls the fake provider scripts (default 1), and "FAKE_STEER"
+    makes the first stream block until a steer arrives; a tuple
+    ``(n_writes, block_n)`` blocks the n-th stream (used by the steer test)."""
+    param = getattr(request, "param", None)
+    if param is None:
+        n_writes, fake_steer = 1, ""
+    elif isinstance(param, int):
+        n_writes, fake_steer = param, ""
+    elif isinstance(param, tuple):
+        n_writes, fake_steer = param[0], str(param[1])
+    else:
+        n_writes = int("".join(ch for ch in param if ch.isdigit()) or 1)
+        fake_steer = param
     home = tmp_path / "home"
     project = tmp_path / "proj"
     project.mkdir()
@@ -57,26 +72,59 @@ def server_process(tmp_path, monkeypatch):
     (project / ".agent").mkdir()
     (project / ".agent" / "approval.toml").write_text("[paths]\nauto_approve = false\n", encoding="utf-8")
 
-    env = dict(os.environ, CODER_AGENT_HOME=str(home))
+    env = dict(os.environ, CODER_AGENT_HOME=str(home), FAKE_WRITES=str(n_writes),
+               FAKE_STEER=fake_steer)
     code = (
-        "import asyncio, json, sys\n"
+        "import asyncio, json, os, sys, threading\n"
         "from coder_agent.llm import LLMProvider\n"
         "from coder_agent.server import Server, handler, run\n"
         "import websockets\n"
         "class Fake(LLMProvider):\n"
         "    def __init__(self):\n"
         "        self.script = [\n"
-        "            {'tool_calls': [('write_file', {'path': 'hello.txt', 'content': 'hi'})]},\n"
-        "            {'content': 'all done'},\n"
-        "        ]\n"
-        "    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None):\n"
-        "        from coder_agent.llm import LLMChunk, ToolCall, Usage\n"
-        "        reply = self.script.pop(0) if self.script else {'content': 'done'}\n"
-        "        if reply.get('content'):\n"
-        "            yield LLMChunk('content', reply['content'])\n"
-        "        calls = [ToolCall(f'c{i}', n, json.dumps(a)) for i, (n, a) in enumerate(reply.get('tool_calls', []))]\n"
-        "        if calls:\n"
-        "            yield LLMChunk('tool_calls', tool_calls=calls)\n"
+        "            {'content': 'writing', 'tool_calls': [('write_file', {'path': 'hello.txt', 'content': 'hi'})]}\n"
+        "            for _ in range(int(os.environ.get('FAKE_WRITES', '1')))\n"
+        "        ] + [{'content': 'all done'}]\n"
+        "        self.steer_gate = threading.Event()  # set by the steer RPC (test hook)\n"
+        "        self._n_calls = 0\n"
+        "        self._block_n = int(os.environ.get('FAKE_STEER', '0') or 0)  # block this stream n\n"
+        "        self._hello_done = False\n"
+        "        self._bye_done = False\n"
+        "        self._parked = set()  # call indexes that already parked (a re-run parks again)\n"
+        "    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None, steer=None):\n"
+        "        from coder_agent.llm import LLMChunk, ToolCall, Usage, LLMCancelled\n"
+        "        self._n_calls += 1\n"
+        "        if self._block_n:  # steer test: the model obeys the steer once it is in the conversation\n"
+        "            steered = any('bye' in str(m.get('content', '')) for m in messages)\n"
+        "            if steered and not self._bye_done:  # write bye.txt exactly once, then finish\n"
+        "                self._bye_done = True\n"
+        "                calls = [ToolCall('c0', 'write_file', json.dumps({'path': 'bye.txt', 'content': 'hi'}))]\n"
+        "            elif not self._hello_done:  # the original request: write hello.txt once\n"
+        "                self._hello_done = True\n"
+        "                calls = [ToolCall('c0', 'write_file', json.dumps({'path': 'hello.txt', 'content': 'hi'}))]\n"
+        "            else:\n"
+        "                calls = []\n"
+        "            # the blocked stream yields 'parked' so the test knows it is mid-stream\n"
+        "            # and safe to steer; a re-run of the same blocked call parks again\n"
+        "            blocked = self._n_calls == self._block_n and self._n_calls not in self._parked\n"
+        "            if blocked:\n"
+        "                self._parked.add(self._n_calls)\n"
+        "            yield LLMChunk('content', 'parked' if blocked else ('writing' if calls else 'all done'))\n"
+        "            if blocked:  # a long stream: park until a steer arrives\n"
+        "                self.steer_gate.clear()\n"
+        "                while not self.steer_gate.is_set():\n"
+        "                    self.steer_gate.wait(timeout=0.05)\n"
+        "                if steer is not None and steer.is_set():\n"
+        "                    raise LLMCancelled()  # the steer aborted the (long) stream\n"
+        "            if calls:\n"
+        "                yield LLMChunk('tool_calls', tool_calls=calls)\n"
+        "        else:  # scripted: reply by call number (a re-run gets the same reply)\n"
+        "            reply = self.script[self._n_calls - 1] if self._n_calls <= len(self.script) else {'content': 'done'}\n"
+        "            calls = [ToolCall(f'c{i}', n, json.dumps(a)) for i, (n, a) in enumerate(reply.get('tool_calls', []))]\n"
+        "            if reply.get('content'):\n"
+        "                yield LLMChunk('content', reply['content'])\n"
+        "            if calls:\n"
+        "                yield LLMChunk('tool_calls', tool_calls=calls)\n"
         "        yield LLMChunk('usage', usage=Usage(100, 10, 110))\n"
         "        yield LLMChunk('done', finish_reason='tool_calls' if calls else 'stop')\n"
         "    def list_models(self):\n"
@@ -204,9 +252,10 @@ def test_reject_approval_with_feedback(server_process):
     asyncio.run(scenario())
 
 
-def test_terminal_command_pty(server_process):
-    """run_command-in-terminal: a one-shot PTY terminal, command_in_terminal
-    event, live output, exit code and interactive stdin."""
+@pytest.mark.parametrize("server_process", [3], indirect=True)
+def test_session_approve_all(server_process):
+    """'Allow all in this session': one answer enables auto-approval for the rest
+    of the session (deny rules still win); a new session resets it."""
     url, project, home = server_process
 
     async def scenario():
@@ -214,26 +263,93 @@ def test_terminal_command_pty(server_process):
             c = Client(ws)
             await c.call("open_project", root=str(project))
 
-            # 1) simple command: event + output + exit code
-            r = await c.call("terminal_command", command="echo cdp-pty-out && echo $((1+1))")
-            ev = await c.wait_event("command_in_terminal", match=lambda e: e["data"]["id"] == r["id"])
-            assert ev["data"]["id"] == r["id"]
-            assert "cdp-pty-out" in ev["data"]["command"]
-            out = await c.wait_output("cdp-pty-out")
-            assert "2" in out, out
-            assert (await c.call("terminal_exit", id=r["id"]))["exit_code"] == 0
+            # first write: approval is asked
+            await c.call("submit", prompt="write hello.txt")
+            ev = await c.wait_event("approval_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"],
+                         response={"allow": True, "session_approve": True})
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            assert (project / "hello.txt").read_text() == "hi"
 
-            # 2) failing command: non-zero exit code
-            r2 = await c.call("terminal_command", command="exit 3")
-            assert (await c.call("terminal_exit", id=r2["id"]))["exit_code"] == 3
+            # the GUI gets the session_approve event and open_project reports it
+            ev = await c.wait_event("session_approve")
+            assert ev["data"]["active"] is True
+            r = await c.call("open_project", root=str(project))
+            assert r["resumed"] is True and r["session_approve"] is True
 
-            # 3) interactive stdin: the user can type into the command
-            r3 = await c.call("terminal_command", command="read line && echo got:$line")
-            ev3 = await c.wait_event("command_in_terminal", match=lambda e: e["data"]["id"] == r3["id"])
-            await asyncio.sleep(0.3)  # let `read` start
-            await c.call("terminal_write", id=ev3["data"]["id"], data="hello\r")
-            out3 = await c.wait_output("got:hello")
-            assert (await c.call("terminal_exit", id=r3["id"]))["exit_code"] == 0
+            # second write: auto-approved (session_approve, or the rule remembered in
+            # turn 1), so no approval is asked at all
+            c.events.clear()
+            await c.call("submit", prompt="write hello.txt again")
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            assert not [e for e in c.events if e["event"] == "approval_requested"], c.events
+
+            # a new session resets the session-wide auto-approve: the first write
+            # must be asked again (the fake provider gets a fresh script, so every
+            # write is asked - answer them all until the turn finishes)
+            await c.call("new_session")
+            c.events.clear()
+            await c.call("submit", prompt="write hello.txt third")
+            ev = await c.wait_event("approval_requested")
+            assert ev["data"]["kind"] == "write"
+            while True:
+                await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+                try:
+                    ev = await c.wait_event("approval_requested", timeout=3)
+                except AssertionError:
+                    break
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            r = await c.call("open_project", root=str(project))
+            assert r["session_approve"] is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", [(2, "1"), (2, "2")], indirect=True)
+def test_steer_while_running(server_process, request):
+    """'Send while running': a steer sent while the agent is working is injected
+    at the next safe point and the agent continues; the turn finishes normally.
+    Param "1": the agent is mid-stream; the steer aborts the stream.
+    Param "2": the agent is between model calls; the steer is queued and injected
+    at the top of the next step.
+
+    The fake provider parks the blocked stream on a gate (after yielding its
+    content chunk), so the test must steer only once the provider is known to be
+    mid-stream (a content_delta has arrived) - otherwise the steer would land
+    before the stream starts and the gate would be cleared after it was set."""
+    url, project, home = server_process
+    block_n = int(getattr(request, "param", (1, "1"))[1])
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="write hello.txt")
+            if block_n > 1:
+                # the agent is parked on the first approval: answer it, then steer
+                # while the second model call is running (blocked)
+                ev = await c.wait_event("approval_requested")
+                await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+            # the blocked stream yields a 'parked' content chunk before it parks on
+            # the gate: once it is seen the provider is mid-stream and safe to steer
+            ev = await c.wait_event("content_delta", match=lambda e: e["data"].get("text") == "parked")
+            r = await c.call("steer", prompt="also write bye.txt")
+            assert r["ok"]
+            ev = await c.wait_event("steer_injected")
+            assert ev["data"]["text"] == "also write bye.txt"
+            # the agent continues with the steer: it asks to write the (last) file
+            ev = await c.wait_event("approval_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            # the steer was obeyed: the model wrote bye.txt
+            assert (project / "bye.txt").read_text() == "hi"
+            # steer with no running turn -> error
+            with pytest.raises(AssertionError):
+                await c.call("steer", prompt="late steer")
 
     asyncio.run(scenario())
 

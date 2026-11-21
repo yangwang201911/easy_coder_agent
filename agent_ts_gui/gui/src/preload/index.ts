@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("api", {
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("pick-directory"),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke("pick-files"),
   pickImages: (): Promise<{ name: string; data_url: string }[]> => ipcRenderer.invoke("pick-images"),
+  webCapture: (url: string): Promise<{ data_url?: string; error?: string }> => ipcRenderer.invoke("web-capture", url),
   readFile: (p: string): Promise<{ content?: string; error?: string }> => ipcRenderer.invoke("read-file", p),
   getLastProject: (): Promise<string | null> => ipcRenderer.invoke("last-project"),
   setLastProject: (p: string): Promise<void> => ipcRenderer.invoke("set-last-project", p),

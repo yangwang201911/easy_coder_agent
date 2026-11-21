@@ -165,6 +165,7 @@ const S = {
   stepsCount: 0,
   turnStart: 0,
   approvalPolicy: null as string | null, // user approval policy text (for the input footer chip)
+  sessionApprove: false, // "allow all in this session" is active (reset on new session / project)
   attachments: [] as { name: string; data_url: string }[],
   fileAttached: null as string | null,
   pendingDocs: new Map<string, string>(),
@@ -298,12 +299,15 @@ function setBusy(busy: boolean) {
   S.busy = busy;
   ($("stop-btn") as HTMLButtonElement).disabled = !busy;
   const sb = $("send-btn") as HTMLButtonElement;
-  // only one session may be in conversation at a time: while the current one
-  // is running the send button is grayed out and unavailable until it finishes
-  // (stopping the running session is the toolbar Stop button)
+  // while the current session is running, Send stays enabled: sending queues the
+  // message as a "steer" - the agent picks it up at the next safe point (right
+  // away if it is between model calls, after the current stream is aborted if it
+  // is mid-reply, after the running command finishes if it is executing one)
   sb.textContent = "Send";
-  sb.disabled = busy;
-  sb.title = busy ? "A session is in conversation; sending is disabled until it finishes" : "Send (Enter)";
+  sb.disabled = false;
+  sb.title = busy
+    ? "Send (Enter): queues your message; the agent picks it up at the next safe point"
+    : "Send (Enter)";
 }
 
 // the task type is chosen in the input toolbar's ＋ menu (not a toolbar select)
@@ -336,13 +340,21 @@ async function refreshConnLabel() {
   }
 }
 
-// approval chip under the input card: "Default permissions" / "Auto-approve"
+// approval chip under the input card: "Default permissions" / "Allow all in this session" / "Auto-approve"
 function refreshApprovalLabel() {
   const text = $("approval-text");
   const btn = $("approval-label");
   const auto = /auto_approve_all\s*=\s*true/.test(S.approvalPolicy ?? "");
-  text.textContent = auto ? "Auto-approve" : "Default permissions";
-  btn.title = `Approval policy: ${auto ? "auto_approve_all = true" : "ask before running commands / writing files"}\nClick to open Settings > Approval`;
+  if (S.sessionApprove) {
+    text.textContent = "Allow all in this session";
+    btn.title = "Everything not denied in the approval policy runs without asking, until this session ends (new session / project resets it).\nClick to open Settings > Approval";
+  } else if (auto) {
+    text.textContent = "Auto-approve";
+    btn.title = `Approval policy: auto_approve_all = true\nClick to open Settings > Approval`;
+  } else {
+    text.textContent = "Default permissions";
+    btn.title = "Ask before running commands / writing files\nClick to open Settings > Approval";
+  }
 }
 
 function savedProjectFor(root: string): SavedProject | null {
@@ -364,6 +376,7 @@ async function openProject(root: string, sessionId: string | null = null) {
   S.compressThreshold = r.config?.context?.compress_threshold ?? 0.95;
   S.compressTarget = r.config?.context?.compress_target ?? 0.5;
   S.config = r.config;
+  S.sessionApprove = !!r.session_approve; // reset for a new engine, kept when resuming
   let saved = savedProjectFor(r.root);
   if (!saved) {
     // a project opened outside the dialog (e.g. --root at boot): remember it
@@ -385,6 +398,7 @@ async function openProject(root: string, sessionId: string | null = null) {
   window.api.getConnMode().then((m) => { if (m === "local") window.api.setLastProject(r.root); }).catch(() => {});
   reloadTaskTypes();
   refreshModelLabel();
+  refreshApprovalLabel();
   void (async () => {
     const r = await call("approval_policy");
     if (r && !r.__error) { S.approvalPolicy = r.text; refreshApprovalLabel(); }
@@ -718,6 +732,8 @@ async function deleteSessions(ids: string[]) {
   if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
   if (r.new_session) {
     // the current session was deleted: the backend started a fresh one
+    S.sessionApprove = false; // new session: "allow all in this session" is reset
+    refreshApprovalLabel();
     resetViews();
     await refreshTurnList();
     await refreshSessionList();
@@ -731,12 +747,23 @@ async function deleteSessions(ids: string[]) {
 // ------------------------------------------------- file tree + file viewer
 // Lazy tree of the project (VS Code explorer style): one level per click,
 // loaded through the file_tree RPC (works for local and remote backends).
-// The mid pane shows open files as tabs; each tab keeps its own content.
-type OpenFile = { path: string; content: string | null; loading: boolean; changed: boolean; loadSeq: number };
-const S_FILES: OpenFile[] = [];
+// The mid pane shows open panes as tabs: project files and web pages. Each tab
+// keeps its own content; web panes render an iframe preview of the page.
+type OpenFile = { kind: "file"; path: string; content: string | null; loading: boolean; changed: boolean; loadSeq: number };
+type OpenWeb = { kind: "web"; path: string; url: string; loading: boolean };
+type OpenPane = OpenFile | OpenWeb;
+const S_FILES: OpenPane[] = [];
 let S_FILES_ACTIVE: string | null = null;
 // paths of files modified in this session, filled by loadTreeLevel
 let S_CHANGED_FILES: Set<string> | null = null;
+
+function paneLabel(p: OpenPane): string {
+  if (p.kind === "web") {
+    try { const u = new URL(p.url); return u.host + (u.pathname === "/" ? "" : u.pathname); }
+    catch { return p.url; }
+  }
+  return fileName(p.path);
+}
 
 async function loadTreeLevel(container: HTMLElement, relPath: string, depth: number) {
   const r = await call("file_tree", { path: relPath });
@@ -812,6 +839,7 @@ async function refreshFileTree() {
   S_CHANGED_FILES = new Set<string>();
   await loadTreeLevel(root, "", 0);
   for (const f of S_FILES) {
+    if (f.kind !== "file") continue;
     f.changed = S_CHANGED_FILES.has(f.path);
     if (f.content != null) void loadFile(f);
   }
@@ -830,13 +858,19 @@ function renderFileTabs() {
   bar.innerHTML = "";
   for (const f of S_FILES) {
     const tab = document.createElement("div");
-    tab.className = "ftab" + (f.path === S_FILES_ACTIVE ? " active" : "");
-    tab.title = f.path;
+    tab.className = "ftab" + (f.path === S_FILES_ACTIVE ? " active" : "") + (f.kind === "web" ? " ftab-web" : "");
+    tab.title = f.kind === "web" ? f.url : f.path;
+    if (f.kind === "web") {
+      const ico = document.createElement("span");
+      ico.className = "ftab-ico";
+      ico.textContent = "\u{1F310}";
+      tab.appendChild(ico);
+    }
     const name = document.createElement("span");
     name.className = "fname";
-    name.textContent = fileName(f.path);
+    name.textContent = paneLabel(f);
     tab.appendChild(name);
-    if (f.changed) {
+    if (f.kind === "file" && f.changed) {
       const dot = document.createElement("span");
       dot.className = "fdot";
       dot.title = "modified in this session";
@@ -845,7 +879,7 @@ function renderFileTabs() {
     const close = document.createElement("button");
     close.className = "fclose";
     close.textContent = "\u2715";
-    close.title = "Close file";
+    close.title = f.kind === "web" ? "Close page" : "Close file";
     close.addEventListener("click", (e) => { e.stopPropagation(); closeFile(f.path); });
     tab.appendChild(close);
     tab.addEventListener("click", () => activateFile(f.path));
@@ -861,6 +895,7 @@ function renderFileBody() {
     body.innerHTML = '<div class="muted">select a file in the Files tab</div>';
     return;
   }
+  if (f.kind === "web") { renderWebBody(body, f); return; }
   if (f.loading) { body.innerHTML = '<div class="muted">loading...</div>'; return; }
   if (f.content == null) { body.innerHTML = '<div class="c-error">failed to load file</div>'; return; }
   const lines = f.content.split("\n");
@@ -886,6 +921,61 @@ function renderFileView() {
   renderFileAttachTag();
 }
 
+// ------------------------------------------------- web page panes (mid pane)
+// A web pane shows a live iframe of a local page. The "+screenshot" tag above
+// the input box captures the page (via a hidden browser window) and attaches
+// the image to the next message, so the model can see and fix the page.
+function renderWebBody(body: HTMLElement, f: OpenWeb) {
+  const bar = document.createElement("div");
+  bar.className = "webbar";
+  const url = document.createElement("span");
+  url.className = "webbar-url";
+  url.textContent = f.url;
+  url.title = f.url;
+  const refresh = document.createElement("button");
+  refresh.className = "webbar-btn";
+  refresh.textContent = "refresh";
+  refresh.title = "Reload the page";
+  refresh.addEventListener("click", () => {
+    const fr = body.querySelector("iframe.webframe") as HTMLIFrameElement | null;
+    if (fr) fr.src = f.url;
+  });
+  const ext = document.createElement("a");
+  ext.className = "webbar-btn webbar-ext";
+  ext.textContent = "open";
+  ext.title = "Open in the system browser";
+  ext.href = f.url;
+  ext.target = "_blank";
+  ext.rel = "noreferrer";
+  bar.append(url, refresh, ext);
+  body.appendChild(bar);
+  const wrap = document.createElement("div");
+  wrap.className = "webframe-wrap";
+  const fr = document.createElement("iframe");
+  fr.className = "webframe";
+  fr.src = f.url;
+  fr.allow = "clipboard-write";
+  wrap.appendChild(fr);
+  body.appendChild(wrap);
+}
+
+function openWeb(url: string) {
+  const u = url.trim();
+  if (!u) return;
+  try { new URL(u); } catch { chat.line(`\n[not a valid url: ${u}]`, "c-warn"); return; }
+  const path = "web:" + u;
+  const existing = S_FILES.find((x) => x.path === path);
+  if (existing) { activateFile(path); return; }
+  const f: OpenWeb = { kind: "web", path, url: u, loading: false };
+  S_FILES.push(f);
+  S_FILES_ACTIVE = path;
+  renderFileView();
+}
+
+// exposed for automated UI tests (CDP)
+(window as any).__openWeb = openWeb;
+Object.defineProperty(window, "__openPanes", { get: () => S_FILES.map((p) => ({ kind: p.kind, path: p.path, url: (p as OpenWeb).url ?? null })) });
+
 function activateFile(path: string) {
   S_FILES_ACTIVE = path;
   renderFileView();
@@ -904,13 +994,14 @@ function closeFile(path: string) {
 function openFile(path: string, changed: boolean) {
   const existing = S_FILES.find((f) => f.path === path);
   if (existing) {
+    if (existing.kind !== "file") { activateFile(path); return; }
     existing.changed = changed;
     if (existing.content != null) { activateFile(path); return; }
     if (!existing.loading) void loadFile(existing);
     activateFile(path);
     return;
   }
-  const f: OpenFile = { path, content: null, loading: true, changed, loadSeq: 0 };
+  const f: OpenFile = { kind: "file", path, content: null, loading: true, changed, loadSeq: 0 };
   S_FILES.push(f);
   S_FILES_ACTIVE = path;
   renderFileView();
@@ -938,14 +1029,16 @@ function clearFileView() {
   renderFileView();
 }
 
-// ------------------------------------------------- attach current file to prompt
+// ------------------------------------------------- attach current pane to prompt
 // When the main pane shows an open file, a "+name" tag appears above the input
 // box. Clicking it attaches the file's content to the next message (shown as
-// "xname"); clicking again detaches it.
+// "xname"); clicking again detaches it. For a web page the tag is
+// "+screenshot": clicking it captures the page and attaches the image to the
+// next message (the model can then see and adjust the page).
 function renderFileAttachTag() {
   const tag = $("file-attach-tag") as HTMLElement;
   const active = S_FILES_ACTIVE ? S_FILES.find((f) => f.path === S_FILES_ACTIVE) : null;
-  if (!active || active.content == null) {
+  if (!active || (active.kind === "file" && active.content == null)) {
     S.fileAttached = null;
     tag.classList.add("hidden");
     tag.innerHTML = "";
@@ -959,15 +1052,48 @@ function renderFileAttachTag() {
   icon.className = "fatag-icon";
   icon.textContent = attached ? "✕" : "+";
   const name = document.createElement("span");
-  name.textContent = fileName(active.path);
-  tag.title = attached
-    ? `Remove ${active.path} from the next message`
-    : `Attach ${active.path} to the next message`;
+  name.textContent = active.kind === "web" ? "screenshot" : fileName(active.path);
+  tag.title = active.kind === "web"
+    ? (attached ? `Remove the screenshot of ${active.url} from the next message`
+                : `Capture ${active.url} and attach the screenshot to the next message`)
+    : (attached ? `Remove ${active.path} from the next message`
+                : `Attach ${active.path} to the next message`);
   tag.append(icon, name);
   tag.onclick = () => {
+    if (active.kind === "web") {
+      if (attached) {
+        S.fileAttached = null;
+        // drop the captured image with it
+        const name = "screenshot " + paneLabel(active);
+        S.attachments = S.attachments.filter((a) => a.name !== name);
+        renderAttachStrip();
+        renderFileAttachTag();
+        return;
+      }
+      S.fileAttached = active.path;
+      renderFileAttachTag();
+      void captureWebToPrompt(active);
+      return;
+    }
     S.fileAttached = attached ? null : active.path;
     renderFileAttachTag();
   };
+}
+
+async function captureWebToPrompt(f: OpenWeb) {
+  chat.line(`\n[capturing ${f.url} ...]`, "c-muted");
+  const r = await window.api.webCapture(f.url);
+  if (r.error) {
+    chat.line(`\n[screenshot failed: ${r.error}]`, "c-error");
+    S.fileAttached = null;
+    renderFileAttachTag();
+    return;
+  }
+  const name = "screenshot " + paneLabel(f);
+  // drop any previous capture of the same page, then attach the fresh one
+  S.attachments = S.attachments.filter((a) => a.name !== name);
+  await addImages([{ name, data_url: r.data_url! }]);
+  chat.line(`\n[attached ${name} - it will be sent with your next message]`, "c-ok");
 }
 
 // called from send(): appends the attached file's content to the prompt.
@@ -978,7 +1104,7 @@ async function withAttachedFile(prompt: string): Promise<string> {
   const f = S_FILES.find((x) => x.path === S.fileAttached);
   S.fileAttached = null;
   renderFileAttachTag();
-  if (!f || f.content == null) return prompt;
+  if (!f || f.kind !== "file" || f.content == null) return prompt;
   let content = f.content;
   let note = "";
   if (content.length > MAX_FILE_CHARS) {
@@ -1103,7 +1229,7 @@ function approvalDialog(req: Record<string, any>): Promise<Record<string, any>> 
       `<div class="body"><div class="diff"></div>` +
       `<div class="row"><label>Remember rule:</label><input type="text" class="rule"/><select class="scope"><option>project</option><option>user</option></select></div>` +
       `<input type="text" class="full feedback" placeholder="Optional feedback sent to the model when rejecting"/>` +
-      `<div class="foot"><button class="reject">Reject</button><button class="allow">Allow once</button><button class="primary remember">Allow && remember rule</button></div>`;
+      `<div class="foot"><button class="reject">Reject</button><button class="allow">Allow once</button><button class="session">Allow all in this session</button><button class="primary remember">Allow && remember rule</button></div>`;
     modal.querySelector(".head")!.textContent = `${what}: ${req.title ?? ""}`;
     modal.querySelector(".diff")!.innerHTML = diffHtml(req.detail ?? "");
     (modal.querySelector(".rule") as HTMLInputElement).value = req.suggested_rule ?? "";
@@ -1111,6 +1237,7 @@ function approvalDialog(req: Record<string, any>): Promise<Record<string, any>> 
     $("modal-backdrop").classList.add("show");
     const done = (resp: Record<string, any>) => { $("modal-backdrop").classList.remove("show"); resolve(resp); };
     modal.querySelector(".allow")!.addEventListener("click", () => done({ allow: true }));
+    modal.querySelector(".session")!.addEventListener("click", () => done({ allow: true, session_approve: true }));
     modal.querySelector(".remember")!.addEventListener("click", () => done({
       allow: true,
       remember_rule: (modal.querySelector(".rule") as HTMLInputElement).value.trim(),
@@ -1231,7 +1358,6 @@ const SETTINGS_TIPS: Record<string, string> = {
   compress_threshold: "Compress when usage reaches this fraction (0.95 = 95%)",
   compress_target: "Compress down to this fraction",
   parallelism: "Concurrent sub-agents. Keep 1 for a single-GPU Ollama.",
-  commands_in_terminal: "Run agent commands in the Terminals panel (live I/O; you can type into them). Off = classic pipe execution.",
   bypass_proxy: "Ignore HTTP(S)_PROXY environment variables (LAN server)",
   planner_thinking: "Allow thinking while planning (slower)",
   doc_analysis: "Summarise relevant MODULE.md files before each subtask",
@@ -1790,7 +1916,7 @@ wireTurnList();
 async function send() {
   const input = $("input") as HTMLTextAreaElement;
   const prompt = input.value.trim();
-  if (!prompt || S.busy || !S.root) return;
+  if (!prompt || !S.root) return;
   input.value = "";
   const images = S.attachments.slice();
   S.attachments = [];
@@ -1801,6 +1927,20 @@ async function send() {
   // BEFORE that (startNewSession clears the file view and would silently
   // drop the attachment).
   const fullPrompt = await withAttachedFile(prompt);
+  // a turn is already running: queue the message as a steer. The agent picks
+  // it up at the next safe point (right away if it is between model calls,
+  // after the current stream is aborted if it is mid-reply, after the running
+  // command finishes if it is executing one) and continues with it.
+  if (S.busy) {
+    if (images.length) chat.line("\n[steer: image attachments are not sent with a steer]", "c-warn");
+    userPromptCard(fullPrompt, `[steer]  ${stampOf(Date.now() / 1000)}`);
+    const r = await call("steer", { prompt: fullPrompt });
+    if (r && r.__error) {
+      chat.line(`\n[error] steer: ${r.__error}`, "c-error");
+      setBusy(false);
+    }
+    return;
+  }
   if (!$("session-list-view").classList.contains("hidden")) {
     if (!(await startNewSession())) return;
   }
@@ -1913,8 +2053,6 @@ function onEvent(ev: AgentEvent) {
     }
   } else if (k === "command_output") {
     commands.write(d.text ?? "", "", true);
-  } else if (k === "command_in_terminal") {
-    onCommandInTerminal(d);
   } else if (k === "terminal_output" || k === "terminal_exited") {
     onTermEvent(k, d);
   } else if (k === "status") {
@@ -1991,6 +2129,15 @@ function onEvent(ev: AgentEvent) {
       refreshContextEstimate();
       await refreshFileTree();
     })();
+  } else if (k === "session_approve") {
+    // "allow all in this session" was granted: the footer chip switches to it
+    S.sessionApprove = !!d.active;
+    refreshApprovalLabel();
+    chat.line("\n[allow all in this session: enabled - only denied commands/files will be blocked]", "c-ok");
+  } else if (k === "steer_injected") {
+    // a queued steer message was picked up by the running turn
+    chat.line(`\n[steer: the agent picked up your message and continues]`, "c-ok");
+    log(ev, `steer injected: ${short(d.text ?? "", 120)}`, "c-ok");
   } else if (k === "approval_requested") {
     log(ev, `approval requested: ${d.title ?? d.kind}`, "c-warn");
     void (async () => {
@@ -2004,6 +2151,11 @@ function onEvent(ev: AgentEvent) {
       // null = cancelled (plan rejected); otherwise the (possibly edited) plan dict
       await call("answer", { req_id: d.req_id, response: plan });
     })();
+  } else if (k === "web_open") {
+    // the agent asked to show a local page in a browser tab
+    openWeb(String(d.url ?? ""));
+    chat.line(`\n[web page opened: ${d.url ?? ""}]`, "c-tool");
+    log(ev, `web page opened: ${d.url ?? ""}`);
   } else if (k === "stage_confirm_requested") {
     log(ev, "stage confirm requested", "c-warn");
     void (async () => {
@@ -2078,6 +2230,19 @@ function bindTabs(barId: string, pagesId: string, pagePrefix: string) {
 bindTabs("left-tabs", "left-pages", "tab-");
 bindTabs("right-tabs", "bottom", "tab-");
 $("tree-refresh-btn").addEventListener("click", () => void refreshFileTree());
+// open a local web page in a browser tab (mid pane)
+function webUrlSubmit() {
+  const inp = $("web-url-input") as HTMLInputElement;
+  let u = inp.value.trim();
+  if (!u) return;
+  if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+  inp.value = "";
+  openWeb(u);
+}
+$("web-open-btn").addEventListener("click", webUrlSubmit);
+($("web-url-input") as HTMLInputElement).addEventListener("keydown", (e) => {
+  if (e.key === "Enter") webUrlSubmit();
+});
 
 function switchLeftTab(name: string) {
   const btn = document.querySelector(`#left-tabs .tab[data-tab="${name}"]`) as HTMLElement;
@@ -2091,9 +2256,7 @@ function switchLeftTab(name: string) {
 const S_TERM = {
   // ready=false until the terminal_open RPC answered: keystrokes typed in the
   // meantime are buffered and flushed, so nothing is written to a dead id
-  // command!="" marks a one-shot agent run_command terminal (created by the
-  // backend via the command_in_terminal event, not by the user's ＋ button)
-  terms: new Map<string, { x: XTerm; fit: FitAddon; closed: boolean; shell: string; ready: boolean; pending: string[]; command: string }>(),
+  terms: new Map<string, { x: XTerm; fit: FitAddon; closed: boolean; shell: string; ready: boolean; pending: string[] }>(),
   current: null as string | null,
 };
 
@@ -2106,10 +2269,7 @@ function renderTermList() {
   for (const [id, t] of S_TERM.terms) {
     const li = document.createElement("li");
     const label = document.createElement("span");
-    label.title = t.command ? `agent command: ${t.command}` : "user terminal";
-    const name = t.command ? `agent: ${short(t.command, 24)}` : id;
-    label.textContent = `${name}${t.closed ? " (exited)" : ""}`;
-    if (t.command) label.classList.add("term-agent");
+    label.textContent = `${id}${t.closed ? " (exited)" : ""}`;
     li.appendChild(label);
     // close button: visible only while the row is hovered (see .term-x in CSS)
     const x = document.createElement("button");
@@ -2169,7 +2329,7 @@ function closeTerminal(id: string) {
 
 // create an xterm.js instance in the terminal pane, register it under ``id``
 // and bind input/resize to the backend. Returns the instance (for disposal).
-function createTermX(id: string, ready: boolean, command: string) {
+function createTermX(id: string, ready: boolean) {
   const pane = termPaneEl();
   const x = new XTerm({
     cursorBlink: true,
@@ -2182,7 +2342,7 @@ function createTermX(id: string, ready: boolean, command: string) {
   x.open(pane);
   (x.element as HTMLElement).style.display = "none";
   (x.element as any).__xterm = x;  // CDP test hook
-  S_TERM.terms.set(id, { x, fit, closed: false, shell: "", ready, pending: [], command });
+  S_TERM.terms.set(id, { x, fit, closed: false, shell: "", ready, pending: [] });
   x.onData((data) => {
     const rec = S_TERM.terms.get(id);
     if (!rec) return;
@@ -2190,12 +2350,70 @@ function createTermX(id: string, ready: boolean, command: string) {
     call("terminal_write", { id, data });
   });
   x.onResize(({ cols, rows }) => call("terminal_resize", { id, cols, rows }));
+  // copy / paste shortcuts: the app has no native menu, so xterm's own
+  // selection must be bridged to the clipboard. Ctrl+Shift+C copies (plain
+  // Ctrl+C must keep reaching the shell as SIGINT); Ctrl+Shift+V / Ctrl+V
+  // paste (plain Ctrl+V is a readline kill-word in the shell).
+  x.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "v" || e.key === "V")) {
+      navigator.clipboard.readText().then((t) => t && x.paste(t)).catch(() => {});
+      return false;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "c" || e.key === "C")) {
+      const sel = x.getSelection();
+      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+      return false;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "a" || e.key === "A")) {
+      x.selectAll();
+      return false;
+    }
+    return true;
+  });
   return x;
 }
 
+// right-click menu on the log panes (Activity / Thinking / Commands / Docs /
+// chat): copy the current selection, paste into the chat input.
+document.addEventListener("contextmenu", (e) => {
+  const t = e.target as HTMLElement;
+  const logEl = t.closest("#tab-activity, #tab-thinking, #tab-commands, #tab-docs, #chat");
+  if (!logEl) return;
+  e.preventDefault();
+  const sel = window.getSelection();
+  const text = sel && sel.rangeCount ? sel.toString() : "";
+  const items: { label: string; enabled?: boolean; fn?: () => void }[] = [];
+  if (text) items.push({ label: "Copy", fn: () => navigator.clipboard.writeText(text).catch(() => {}) });
+  if (logEl.id === "chat") {
+    items.push({ label: "Paste", fn: () => navigator.clipboard.readText().then((t2) => {
+      const inp = $("input") as HTMLTextAreaElement;
+      const s = inp.selectionStart ?? inp.value.length, en = inp.selectionEnd ?? s;
+      inp.value = inp.value.slice(0, s) + t2 + inp.value.slice(en);
+      inp.selectionStart = inp.selectionEnd = s + t2.length;
+      inp.focus();
+    }).catch(() => {}) });
+  }
+  if (!items.length) items.push({ label: "No selection", enabled: false });
+  showMenu(e.clientX, e.clientY, items);
+});
+
+// right-click menu on the terminal: copy / paste / select all
+document.addEventListener("contextmenu", (e) => {
+  if (!e.target.closest("#term-pane")) return;
+  e.preventDefault();
+  const x = S_TERM.terms.get(S_TERM.current ?? "")?.x;
+  if (!x) return;
+  showMenu(e.clientX, e.clientY, [
+    { label: "Copy", enabled: !!x.getSelection(), fn: () => { const s = x.getSelection(); if (s) navigator.clipboard.writeText(s).catch(() => {}); } },
+    { label: "Paste", fn: () => navigator.clipboard.readText().then((t) => t && x.paste(t)).catch(() => {}) },
+    { label: "Select all", fn: () => x.selectAll() },
+  ]);
+});
+
 async function openTerminal() {
   const id = `term-${Date.now().toString(36)}`;  // placeholder until the RPC answers
-  createTermX(id, false, "");
+  createTermX(id, false);
   renderTermList();  // show the pending entry immediately
 
   const r = await call("terminal_open", { cols: 80, rows: 24, cwd: S.root ?? undefined });
@@ -2212,20 +2430,11 @@ async function openTerminal() {
   const pending = t?.pending ?? [];
   S_TERM.terms.delete(id);
   if (t) t.x.dispose();
-  createTermX(real, true, "");
+  createTermX(real, true);
   const rec = S_TERM.terms.get(real)!;
   rec.shell = r.shell ?? "";
   for (const data of pending) call("terminal_write", { id: real, data });  // flush early keystrokes
   selectTerminal(real);
-}
-
-// the agent's run_command opened a one-shot PTY on the backend: attach a local
-// xterm.js to it (the backend already runs the command) and show the tab
-function onCommandInTerminal(d: Record<string, any>) {
-  const id = d.id as string;
-  if (S_TERM.terms.has(id)) return;
-  createTermX(id, true, String(d.command ?? ""));
-  selectTerminal(id);
 }
 
 function onTermEvent(k: string, d: Record<string, any>) {
@@ -2499,6 +2708,8 @@ async function startNewSession(): Promise<boolean> {
   if (S.busy || !S.root) return false;
   const r = await call("new_session");
   if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return false; }
+  S.sessionApprove = false; // a new session: "allow all in this session" is reset
+  refreshApprovalLabel();
   resetViews();
   await refreshTurnList();
   await refreshSessionList();
