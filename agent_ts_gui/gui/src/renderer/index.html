@@ -19,14 +19,13 @@
   <div id="body">
     <div id="left">
       <div id="left-rail">
-        <button class="tab active" id="rail-project" data-tab="turns" title="Project (Turns)">
-          <svg width="20" height="20" viewBox="0 0 16 16" style="display:block"><path d="M2 4.5 C2 3.7 2.7 3 3.5 3 H6.2 L7.6 4.4 H12.5 C13.3 4.4 14 5.1 14 5.9 V11.5 C14 12.3 13.3 13 12.5 13 H3.5 C2.7 13 2 12.3 2 11.5 Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <button class="tab" id="rail-new-session" title="New session">
+          <svg width="20" height="20" viewBox="0 0 16 16" style="display:block"><path d="M8 3 V13 M3 8 H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
-        <button id="rail-project-menu" title="Switch / manage projects">⋯</button>
-        <button class="tab" data-tab="sessions" title="Chat">
+        <button class="tab active" data-tab="sessions" title="Chat">
           <svg width="20" height="20" viewBox="0 0 16 16" style="display:block"><path d="M2.5 3.5 H13.5 V11 H8 L4.5 14 V11 H2.5 Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
         </button>
-        <button class="tab" data-tab="files" title="Files">
+        <button class="tab" data-tab="project" title="Project (Files / Projects)">
           <svg width="20" height="20" viewBox="0 0 16 16" style="display:block"><path d="M4 2 H9.5 L12.5 5 V14 H4 Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 2 V5 H12.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
         </button>
         <span class="flex1"></span>
@@ -35,12 +34,9 @@
         </button>
       </div>
       <div id="left-pages">
-        <div id="tab-turns" class="tabpage">
-          <ul id="turn-list" class="list"></ul>
-        </div>
-        <div id="tab-sessions" class="tabpage hidden">
+        <div id="tab-sessions" class="tabpage">
           <div id="session-list-view">
-            <button id="new-session-btn" class="wide">New session</button>
+            <button id="new-session-btn" class="wide">Chat</button>
             <ul id="session-list" class="list"></ul>
           </div>
           <div id="session-chat-view" class="hidden">
@@ -48,9 +44,6 @@
               <button id="chat-back-btn" title="Back to the sessions list">←</button>
               <span id="chat-view-title" class="muted">session</span>
               <span class="flex1"></span>
-              <button id="chat-turns-btn" title="Show this session's turns" class="flat">
-                <svg width="14" height="14" viewBox="0 0 16 16" style="display:block"><rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="5" y1="6.5" x2="11" y2="6.5" stroke="currentColor" stroke-width="1.2"/><line x1="5" y1="9.5" x2="9" y2="9.5" stroke="currentColor" stroke-width="1.2"/></svg>
-              </button>
             </div>
             <div id="chat" class="log"></div>
           </div>
@@ -99,15 +92,31 @@
             </div>
           </div>
         </div>
-        <div id="tab-files" class="tabpage hidden">
-          <div id="tree-toolbar">
-            <button id="tree-refresh-btn" title="Reload the tree">⟳</button>
-            <span class="muted">project files</span>
-            <span class="flex1"></span>
-            <input id="web-url-input" type="text" placeholder="http://localhost:8000/" title="Open a local web page in a browser tab" />
-            <button id="web-open-btn" title="Open the web page above in a browser tab">🌐</button>
+        <div id="tab-project" class="tabpage hidden">
+          <div id="project-subs">
+            <button class="subtab active" data-sub="files">Files</button>
+            <button class="subtab" data-sub="projects">Projects</button>
           </div>
-          <div id="file-tree"></div>
+          <div id="project-sub-files">
+            <div id="tree-toolbar">
+              <button id="tree-refresh-btn" title="Reload the tree">⟳</button>
+              <span class="muted">project files</span>
+              <span class="flex1"></span>
+              <input id="web-url-input" type="text" placeholder="http://localhost:8000/" title="Open a local web page in a browser tab" />
+              <button id="web-open-btn" title="Open the web page above in a browser tab">🌐</button>
+            </div>
+            <div id="file-tree"></div>
+          </div>
+          <div id="project-sub-projects" class="hidden">
+            <div id="proj-toolbar">
+              <button id="proj-add-btn" title="Add a project">＋</button>
+              <button id="proj-rename-btn" title="Rename the selected project">Rename</button>
+              <button id="proj-del-btn" title="Delete the selected project">Delete</button>
+              <span class="flex1"></span>
+            </div>
+            <div id="proj-list"></div>
+            <div id="proj-tip" class="muted"></div>
+          </div>
         </div>
       </div>
     </div>

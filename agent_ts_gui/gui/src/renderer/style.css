@@ -257,22 +257,43 @@ body.resizing-h * { cursor: row-resize !important; }
 #left-rail .tab:hover { color: var(--text); }
 #left-rail .tab.active { border-color: var(--border); background: var(--hover); color: var(--text); }
 #left-rail #rail-settings { margin-top: auto; }
-#rail-project-menu {
-  width: 32px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 13px;
-  line-height: 1;
-}
-#rail-project-menu:hover { background: var(--hover-strong); color: var(--text); }
 #left-pages { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 #left-pages .tabpage { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 #left-pages .tabpage.hidden { display: none !important; }
 #tab-sessions { overflow: hidden; }
+/* combined Project tab: Files / Projects sub-tabs */
+#tab-project { overflow: hidden; }
+#project-subs {
+  flex: none; display: flex; gap: 4px;
+  padding: 4px 8px 0; border-bottom: 1px solid var(--border);
+}
+#project-subs .subtab {
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: 4px 4px 0 0; background: transparent;
+  padding: 3px 10px; font-size: 12px;
+}
+#project-subs .subtab.active { background: var(--panel); border-color: var(--border); font-weight: bold; }
+#project-sub-files, #project-sub-projects { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#project-sub-files.hidden, #project-sub-projects.hidden { display: none !important; }
+#proj-toolbar {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border-bottom: 1px solid var(--row-border);
+}
+#proj-toolbar button { padding: 1px 7px; font-size: 12px; }
+#proj-list { flex: 1; min-height: 0; overflow-y: auto; }
+#proj-tip { flex: none; padding: 4px 8px; font-size: 11px; }
+#proj-list .projrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; cursor: pointer; border-bottom: 1px solid var(--row-border);
+}
+#proj-list .projrow:hover { background: var(--hover); }
+#proj-list .projrow.sel { background: var(--selected); }
+#proj-list .projrow.cur .pname::after { content: " ●"; color: var(--accent); }
+#proj-list .projrow .pname { font-weight: bold; white-space: nowrap; }
+#proj-list .projrow .pmode {
+  font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--badge-bg); color: var(--text-soft);
+}
+#proj-list .projrow .ppath { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft2); font-size: 12px; }
 #tab-sessions .list { flex: 1; overflow-y: auto; min-height: 0; }
 /* sessions tab: list view <-> chat view (chat opens on top of the list) */
 #session-list-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -352,6 +373,8 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
   border-left: 1px solid var(--border);
 }
 #term-list { flex: 1; overflow-y: auto; }
+/* hide the list column while no terminal is open */
+#term-list-col.empty { display: none; }
 /* terminal actions shown in the tab bar while the Terminals tab is active */
 #term-actions { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
 /* panel-level actions (maximize / hide) are always visible */
@@ -363,7 +386,8 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 }
 #term-actions button:hover, #term-panel-actions button:hover { background: var(--hover); }
 /* maximize: the bottom panel takes the whole body height */
-body.term-maximized #mid, body.term-maximized #split-bottom { display: none; }
+body.term-maximized #mid, body.term-maximized #split-bottom, body.term-maximized #statusbar { display: none; }
+body.term-maximized #bottom { flex: 1; height: auto; min-height: 0; }
 /* hover-only close button on each terminal row */
 #term-list li { position: relative; }
 #term-list li .term-x {
@@ -456,12 +480,14 @@ body.term-maximized #mid, body.term-maximized #split-bottom { display: none; }
    (connection / permissions) under the card. */
 #input-zone {
   flex: none;
-  height: 130px;
   min-height: 90px;
   display: flex;
   flex-direction: column;
   padding: 8px 10px 8px;
 }
+/* the zone grows with its content (e.g. the image attach strip); the resize
+   handle sets an explicit height that overrides this */
+#input { min-height: 60px; }
 #input-card {
   flex: 1;
   min-height: 0;
