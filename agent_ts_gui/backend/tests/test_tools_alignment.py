@@ -147,6 +147,30 @@ def test_search_unconfigured_raises(ctx, monkeypatch):
         web.web_search(ctx, {"query": "x"})
 
 
+def test_extract_memory(tmp_path):
+    from coder_agent import knowledge
+
+    class FakeProvider:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def complete(self, messages, **kw):
+            return self.reply
+
+    saved = knowledge.extract_memory(FakeProvider('["use ./run_tests.sh backend to test", "always run lint"]'),
+                                     tmp_path, "do stuff", "done")
+    assert saved == ["use ./run_tests.sh backend to test", "always run lint"]
+    mem = (tmp_path / ".agent" / "memory.md").read_text(encoding="utf-8")
+    assert "run_tests.sh" in mem
+    # dedupe: same note again is not appended twice
+    knowledge.extract_memory(FakeProvider('["use ./run_tests.sh backend to test"]'), tmp_path, "x", "y")
+    assert mem == (tmp_path / ".agent" / "memory.md").read_text(encoding="utf-8")
+    # nothing to remember / broken reply -> no save, no raise
+    assert knowledge.extract_memory(FakeProvider("[]"), tmp_path, "x", "y") == []
+    assert knowledge.extract_memory(FakeProvider("not json at all"), tmp_path, "x", "y") == []
+    assert knowledge.extract_memory(FakeProvider("boom"), tmp_path, "x", "y") == []
+
+
 def test_strip_old_images():
     from coder_agent.context.compression import strip_old_images
 

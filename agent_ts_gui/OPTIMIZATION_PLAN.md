@@ -13,7 +13,7 @@
 | 4 | grep_search 换 ripgrep + 上下文行 | 高 | ✅ | `tools/fs.py` |
 | 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ✅ | `context/compression.py` |
 | 6 | 浏览器多 tab | 中 | ✅ | `tools/browser.py` |
-| 7 | 记忆自动沉淀（turn-end 提取） | 中 | ⬜ | `knowledge.py` |
+| 7 | 记忆自动沉淀（turn-end 提取） | 中 | ✅ | `knowledge.py` + `engine.py` |
 | 8 | 系统提示注入动态环境信息 | 中 | ⬜ | `prompts/builder.py` |
 | 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ⬜ | `tools/web.py` |
 | 10 | 循环检测模糊化（相似参数） | 低 | ✅ | `agent.py` 主循环 |
@@ -68,10 +68,13 @@
   `browser_switch_tab`（1-based 切回旧 tab，返回快照）；`browser_close` 关全部。
 - **验证**：`test_browser_flow` 扩展了 new_tab/switch_tab/越界 断言（本机有 chromium，真实跑通）。
 
-### 7. 记忆自动沉淀 ⬜
+### 7. 记忆自动沉淀 ✅
 - **问题**：memory 只在启动时读入 prompt，依赖模型自觉调用 `remember`。
-- **方案**：turn 结束后轻量调用让模型判断"本次值得长期记住的"，追加到
-  `memory.md`；按主题分文件避免单文件膨胀。
+- **实现**：`knowledge.extract_memory`（thinking off、max_tokens=300，要求模型回
+  JSON 数组 ≤3 条）；`engine.submit` 在 turn `done` 后起后台 daemon 线程执行
+  （不占 turn 锁、不阻塞回复），保存成功发 `memory_saved` 事件；
+  配置开关 `agent.memory_extraction`（默认开）；全程 best-effort 不抛异常。
+- **验证**：`test_extract_memory`（保存/去重/空/坏 JSON 不抛）。
 
 ### 8. 系统提示动态环境信息 ⬜
 - **问题**：`prompts/builder.py` 纯静态。
@@ -108,4 +111,6 @@
 - 2026-11-23：#5（压缩时清理旧图片，保留最近 1 张）完成。
   验证：backend 23 passed。已提交 185e871。
 - 2026-11-23：#6（浏览器多 tab：browser_new_tab / browser_switch_tab）完成。
-  验证：backend 23 passed（浏览器 E2E 真实跑通）。
+  验证：backend 23 passed（浏览器 E2E 真实跑通）。已提交 5edabfe。
+- 2026-11-23：#7（turn 结束后台自动提取记忆，memory_saved 事件）完成。
+  验证：backend 24 passed。

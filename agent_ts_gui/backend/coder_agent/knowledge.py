@@ -13,8 +13,10 @@ model reads the files on demand (keeps the context small for local models).
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,6 +185,37 @@ def append_memory(root: Path, note: str, scope: str = "project") -> Path:
     new = old + f"- {time.strftime('%Y-%m-%d')}: {note}\n"
     p.write_text(new[-MEMORY_MAX_CHARS:], encoding="utf-8")
     return p
+
+
+def extract_memory(provider, root: Path, prompt: str, final_text: str,
+                   cancel: Optional[threading.Event] = None) -> list[str]:
+    """Ask the model (thinking off, small budget) for durable facts from this turn.
+
+    Returns the notes that were actually saved (empty when nothing is worth
+    keeping). Never raises: extraction is best-effort and must not break the turn.
+    """
+    try:
+        transcript = (f"User asked: {prompt[:1500]}\n\nAgent's final answer: {final_text[:3000]}")
+        reply = provider.complete(
+            [
+                {"role": "system", "content":
+                    "You review a finished coding-agent turn and extract durable facts for future sessions: "
+                    "build/test commands, project conventions, environment quirks, pitfalls discovered. "
+                    "Reply with a JSON array of short strings (one sentence each, max 3). "
+                    "If nothing is worth remembering, reply []."},
+                {"role": "user", "content": transcript},
+            ],
+            cancel=cancel, thinking=False, max_tokens=300,
+        )
+        notes = json.loads(reply[reply.find("["): reply.rfind("]") + 1])
+        saved = []
+        for note in notes[:3]:
+            if isinstance(note, str) and note.strip():
+                append_memory(root, note.strip(), "project")
+                saved.append(note.strip())
+        return saved
+    except Exception:  # noqa: BLE001 - best effort
+        return []
 
 
 def memory_tools() -> list[Tool]:

@@ -151,9 +151,22 @@ class Engine:
             self.session.finish_turn(turn, result.status, result.final_text)
             self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error)
             self.bus.emit("status", state="idle", detail="")
+            if self.config.agent.memory_extraction and result.status == "done":
+                # background: extraction must not hold the turn lock
+                threading.Thread(
+                    target=self._extract_memory, args=(provider, prompt, result.final_text),
+                    daemon=True, name="memory-extract",
+                ).start()
             return result
         finally:
             self._lock.release()
+
+    def _extract_memory(self, provider: LLMProvider, prompt: str, final_text: str) -> None:
+        """Best-effort: persist durable facts from this turn (never breaks the turn)."""
+        from .knowledge import extract_memory
+        saved = extract_memory(provider, self.root, prompt, final_text)
+        if saved:
+            self.bus.emit("memory_saved", notes=saved)
 
     # ------------------------------------------------------ plan (subtasks)
     def submit_plan(
