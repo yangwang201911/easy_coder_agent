@@ -15,7 +15,7 @@ function getWsUrl() { return new Promise((resolve) => { http.get("http://127.0.0
   const send=(method,params={})=>new Promise((r)=>{ id+=1; pending.set(id,r); ws.send(JSON.stringify({id,method,params})); });
   await new Promise((r)=>ws.on("open",r));
   const evalJs=(expr)=>send("Runtime.evaluate",{expression:expr,returnByValue:true,awaitPromise:true}).then(r=>r.result&&r.result.result?r.result.result.value:undefined);
-  for (let i=0;i<120;i++){ const l=await evalJs("document.getElementById('root-label')&&document.getElementById('root-label').textContent"); if(l&&l.includes("proj_a")) break; await wait(500); }
+  for (let i=0;i<120;i++){ const l=await evalJs("document.getElementById('rail-project-menu')&&document.getElementById('rail-project-menu').textContent"); if(l&&l.includes("proj_a")) break; await wait(500); }
   await evalJs(`localStorage.setItem("coder-agent.projects", JSON.stringify([]))`);
   await evalJs(`window.api.pickDirectory = () => Promise.resolve("/tmp/proj_b")`);
   await evalJs("document.getElementById('projects-btn').click()");

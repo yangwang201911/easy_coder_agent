@@ -1,6 +1,6 @@
 // Preload: type-safe bridge between renderer and main.
 import { contextBridge, ipcRenderer } from "electron";
-import type { AgentEvent, ReplyMsg } from "../types";
+import type { AgentEvent, ReplyMsg, Connection, SshHost } from "../types";
 
 contextBridge.exposeInMainWorld("api", {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke("backend-url"),
@@ -13,13 +13,20 @@ contextBridge.exposeInMainWorld("api", {
   onEvent: (cb: (ev: AgentEvent) => void) => ipcRenderer.on("agent-event", (_e, ev) => cb(ev)),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("pick-directory"),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke("pick-files"),
+  pickImages: (): Promise<{ name: string; data_url: string }[]> => ipcRenderer.invoke("pick-images"),
+  webCapture: (url: string): Promise<{ data_url?: string; error?: string }> => ipcRenderer.invoke("web-capture", url),
   readFile: (p: string): Promise<{ content?: string; error?: string }> => ipcRenderer.invoke("read-file", p),
   getLastProject: (): Promise<string | null> => ipcRenderer.invoke("last-project"),
   setLastProject: (p: string): Promise<void> => ipcRenderer.invoke("set-last-project", p),
   restartBackend: (root: string | null): Promise<void> => ipcRenderer.invoke("restart-backend", root),
-  getConnection: (): Promise<{ mode: string; host: string; port: number; token: string }> => ipcRenderer.invoke("get-connection"),
-  getConnMode: (): Promise<"local" | "remote"> => ipcRenderer.invoke("conn-mode"),
-  setConnection: (c: { mode: string; host: string; port: number; token: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("set-connection", c),
+  getConnection: (): Promise<Connection> => ipcRenderer.invoke("get-connection"),
+  getConnMode: (): Promise<"local" | "remote" | "ssh"> => ipcRenderer.invoke("conn-mode"),
+  sshConnect: (o: { host?: SshHost | null; token?: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("ssh-connect", o),
+  sshHostsList: (): Promise<{ hosts: SshHost[]; active: string | null }> => ipcRenderer.invoke("ssh-hosts-list"),
+  sshHostsSave: (o: { hosts: SshHost[]; active?: string | null }): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("ssh-hosts-save", o),
+  getConnError: (): Promise<string> => ipcRenderer.invoke("get-conn-error"),
+  onConnError: (cb: (msg: string) => void) => ipcRenderer.on("conn-error", (_e, msg) => cb(msg)),
+  setConnection: (c: Connection & { root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("set-connection", c),
   winMinimize: (): Promise<void> => ipcRenderer.invoke("win-minimize"),
   winToggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("win-toggle-maximize"),
   winIsMaximized: (): Promise<boolean> => ipcRenderer.invoke("win-is-maximized"),

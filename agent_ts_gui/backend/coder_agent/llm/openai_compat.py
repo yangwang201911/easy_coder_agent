@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
+import time
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -13,7 +15,30 @@ from openai import DefaultHttpxClient, OpenAI
 from ..config import SamplingConfig, ServerConfig, ThinkingConfig
 from .base import LLMCancelled, LLMChunk, LLMError, LLMProvider, ToolCall, Usage
 from .prompt_dump import dump_request
+from .server_info import probe_vision
 from .think_parser import ThinkParser
+
+log = logging.getLogger(__name__)
+
+# Transient server/load errors worth retrying with backoff; other 4xx fail fast.
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 1.5  # seconds; attempt n waits base * 2**(n-1) (+ jitter)
+
+
+def _is_retryable(e: openai.OpenAIError) -> bool:
+    status = getattr(e, "status_code", None)
+    if status is not None:
+        return status in _RETRYABLE_STATUS
+    return isinstance(e, (openai.APIConnectionError, openai.APITimeoutError))
+
+
+def _has_image(messages: list[dict]) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+            return True
+    return False
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -88,21 +113,48 @@ class OpenAICompatProvider(LLMProvider):
         cancel: Optional[threading.Event] = None,
         thinking: Optional[bool] = None,
         max_tokens: Optional[int] = None,
+        steer: Optional[threading.Event] = None,
     ) -> Iterator[LLMChunk]:
+        # A text-only model (e.g. Ollama without a vision projector) answers
+        # 500 "image input is not supported" - fail fast with an actionable
+        # message instead of letting the raw server error surface. The probe
+        # result is cached; it only runs when the request actually carries images.
+        if _has_image(messages) and probe_vision(self.server) is False:
+            raise LLMError(
+                "the model server rejects image input (text-only model - e.g. Ollama "
+                "needs a vision-capable model / mmproj). Remove the image attachments "
+                "or switch to a vision model in Settings.")
         kw = self.build_request(messages, tools, thinking, max_tokens)
         if self.dump:
             dump_request(self.dump_root, kw)
-        try:
-            stream = self.client.chat.completions.create(**kw)
-        except openai.OpenAIError as e:
-            raise LLMError(f"{type(e).__name__}: {e}") from e
+        stream = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            if cancel is not None and cancel.is_set():
+                raise LLMCancelled()
+            try:
+                stream = self.client.chat.completions.create(**kw)
+                break
+            except openai.OpenAIError as e:
+                if attempt >= _MAX_RETRIES or not _is_retryable(e):
+                    raise LLMError(f"{type(e).__name__}: {e}") from e
+                delay = _BACKOFF_BASE * (2 ** (attempt - 1))
+                log.warning("LLM request failed (%s), retry %d/%d in %.1fs",
+                            type(e).__name__, attempt, _MAX_RETRIES, delay)
+                yield LLMChunk("status", f"LLM server error ({type(e).__name__}), retrying {attempt}/{_MAX_RETRIES}...")
+                # sleep in small slices so cancel/steer stay responsive
+                deadline = time.monotonic() + delay
+                while time.monotonic() < deadline:
+                    if (cancel is not None and cancel.is_set()) or (steer is not None and steer.is_set()):
+                        raise LLMCancelled()
+                    time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        assert stream is not None
 
         parser = ThinkParser()
         acc: dict[int, dict] = {}
         finish: Optional[str] = None
         try:
             for chunk in stream:
-                if cancel is not None and cancel.is_set():
+                if (cancel is not None and cancel.is_set()) or (steer is not None and steer.is_set()):
                     raise LLMCancelled()
                 if getattr(chunk, "usage", None):
                     u = chunk.usage

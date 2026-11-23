@@ -30,6 +30,9 @@ class ToolContext:
     max_output_chars: int = 12000
     read_roots: list[Path] = field(default_factory=agent_read_roots)  # extra READ-only locations
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
+    ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
+    todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
+    turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -64,14 +67,24 @@ class ToolContext:
 
 
 @dataclass
+class ToolOutput:
+    """A tool's result: text for the model, plus optional images (data URLs) that
+    are injected into the conversation as image_url parts (vision models)."""
+    text: str
+    images: list[dict] = field(default_factory=list)  # [{"name": str, "data_url": "data:image/..."}]
+
+
+@dataclass
 class Tool:
     name: str
     description: str
     parameters: dict  # JSON schema
-    func: Callable[[ToolContext, dict], str]
+    func: Callable[[ToolContext, dict], "str | ToolOutput"]
     kind: str = "read"  # read | write | exec
     preview: Optional[Callable[[ToolContext, dict], str]] = None  # diff / detail for approval
     command_of: Optional[Callable[[dict], str]] = None  # exec tools: the command line the approval policy judges
+    target_of: Optional[Callable[[dict], str]] = None  # network tools: the host the approval policy judges
+    cacheable: bool = False  # True: repeat calls with an unchanged target file return a stub (saves tokens)
 
     def schema(self) -> dict:
         return {
@@ -127,16 +140,38 @@ class ToolRegistry:
             )
         return {k: _coerce(v, props.get(k, {})) for k, v in args.items() if k in props}
 
-    def execute(self, name: str, args: dict, ctx: ToolContext) -> tuple[bool, str]:
-        """Run a tool. Returns ``(ok, text)``; never raises for tool-level errors."""
+    def execute(self, name: str, args: dict, ctx: ToolContext) -> tuple[bool, ToolOutput]:
+        """Run a tool. Returns ``(ok, ToolOutput)``; never raises for tool-level errors."""
         tool = self._tools.get(name)
         if tool is None:
-            return False, f"ERROR: unknown tool '{name}'. Available: {', '.join(self._tools)}"
+            return False, ToolOutput(f"ERROR: unknown tool '{name}'. Available: {', '.join(self._tools)}")
         try:
             clean = self.normalize_args(tool, args)
+            key = None
+            if tool.cacheable:
+                # (tool, args, mtime of the target file): a repeat read of an
+                # unchanged file returns a stub instead of the whole content again
+                try:
+                    p = ctx.resolve_readable(str(clean.get("path", "")))
+                except ToolError:
+                    p = None
+                mtime = p.stat().st_mtime_ns if p is not None and p.is_file() else 0
+                key = (name, json.dumps(clean, sort_keys=True, ensure_ascii=False), mtime)
+                prev = ctx.turn_cache.get(key)
+                if prev is not None:
+                    return True, ToolOutput(
+                        f"[unchanged since your earlier {name} call in this turn: "
+                        f"{prev.text.splitlines()[0] if prev.text else name} - the content is already in "
+                        "your context; do not re-read it]"
+                    )
             out = tool.func(ctx, clean)
-            return True, truncate_middle(out, ctx.max_output_chars)
+            if isinstance(out, str):
+                out = ToolOutput(out)
+            out.text = truncate_middle(out.text, ctx.max_output_chars)
+            if key is not None:
+                ctx.turn_cache[key] = out
+            return True, out
         except ToolError as e:
-            return False, f"ERROR: {e}"
+            return False, ToolOutput(f"ERROR: {e}")
         except Exception as e:  # noqa: BLE001 - report anything to the model
-            return False, f"ERROR: {type(e).__name__}: {e}"
+            return False, ToolOutput(f"ERROR: {type(e).__name__}: {e}")

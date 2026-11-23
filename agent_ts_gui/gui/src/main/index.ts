@@ -6,6 +6,8 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import WebSocket from "ws";
 import { backendUrlFromLine } from "./backend-output";
+import { openTunnel, SshInteractionRequired, Tunnel } from "./ssh-tunnel";
+import { showPrompt } from "./prompt-window";
 
 // Backend location: in dev the repo's backend/ dir + its venv python; in a
 // packaged app a standalone PyInstaller bundle shipped in resources/backend.
@@ -36,31 +38,75 @@ let reconnecting = false; // suppress "backend-exit" while switching connections
 let remoteReconnect = false; // auto-reconnect is active for the current remote connection
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectDelay = 1000; // ms, grows x2 up to 15s
+let tunnel: Tunnel | null = null; // ssh tunnel (ssh mode only)
+let tunnelPort = 0; // local port the tunnel forwards to the remote server
+let lastConnError = ""; // last connection problem, shown by the renderer (it may not be loaded yet when it happens)
+const rememberedPasswords = new Map<string, string>(); // session cache (per target), filled only after a successful login
 
 // ------------------------------------------------------------- connection
 // mode "local"  = spawn the bundled backend on this machine (default, as before).
 // mode "remote" = connect to a coder-agent-server running on another machine
 // (or on this machine, started separately). One server serves one GUI.
-interface Connection { mode: "local" | "remote"; host: string; port: number; token: string; }
+// mode "ssh"    = like remote, but the GUI opens an ssh tunnel
+// (ssh -N -L localPort:127.0.0.1:remotePort user@host) and connects to the
+// local port; the server only needs to listen on loopback on the remote box.
+interface SshTarget { host: string; user: string; port: number; identity: string; remotePort: number; }
+interface SshHost extends SshTarget { name: string; }
+interface Connection { mode: "local" | "remote" | "ssh"; host: string; port: number; token: string; ssh?: SshTarget; }
 const DEFAULT_CONN: Connection = { mode: "local", host: "127.0.0.1", port: 8931, token: "" };
 let conn: Connection = { ...DEFAULT_CONN };
+// Named SSH hosts managed in Settings > Remote server; conn.ssh is the currently
+// selected one (used at startup / for Apply & reconnect).
+let sshHosts: SshHost[] = [];
 
 function connFile(): string {
   return path.join(app.getPath("userData"), "connection.json");
+}
+function normSshHost(h: any): SshHost | null {
+  if (!h || typeof h !== "object") return null;
+  const host = String(h.host || ""), user = String(h.user || "");
+  if (!host || !user) return null;
+  return { name: String(h.name || `${user}@${host}`), host, user,
+    port: Number(h.port) || 22, identity: String(h.identity || ""),
+    remotePort: Number(h.remotePort) || 8931 };
 }
 function loadConn(): Connection {
   try {
     if (fs.existsSync(connFile())) {
       const c = JSON.parse(fs.readFileSync(connFile(), "utf8"));
-      return { mode: c.mode === "remote" ? "remote" : "local",
+      const mode = c.mode === "remote" ? "remote" : c.mode === "ssh" ? "ssh" : "local";
+      const conn: Connection = { mode,
         host: String(c.host || "127.0.0.1"), port: Number(c.port) || 8931, token: String(c.token || "") };
+      if (mode === "ssh" && c.ssh) {
+        conn.ssh = { host: String(c.ssh.host || ""), user: String(c.ssh.user || ""),
+          port: Number(c.ssh.port) || 22, identity: String(c.ssh.identity || ""),
+          remotePort: Number(c.ssh.remotePort) || 8931 };
+      }
+      // named host list (new format); migrate the old single conn.ssh into it
+      sshHosts = Array.isArray(c.ssh_hosts)
+        ? c.ssh_hosts.map(normSshHost).filter((h): h is SshHost => !!h)
+        : [];
+      if (mode === "ssh" && conn.ssh && !sshHosts.some((h) =>
+          h.host === conn.ssh!.host && h.user === conn.ssh!.user && h.port === conn.ssh!.port)) {
+        sshHosts.push({ name: `${conn.ssh.user}@${conn.ssh.host}`, ...conn.ssh });
+      }
+      return conn;
     }
   } catch { /* ignore */ }
   return { ...DEFAULT_CONN };
 }
 function saveConn(c: Connection) {
   conn = c;
-  try { fs.writeFileSync(connFile(), JSON.stringify(c, null, 2)); } catch { /* ignore */ }
+  try { fs.writeFileSync(connFile(), JSON.stringify({ ...c, ssh_hosts: sshHosts }, null, 2)); } catch { /* ignore */ }
+}
+function saveSshHosts(hosts: SshHost[], activeName?: string | null) {
+  sshHosts = hosts;
+  // keep conn.ssh pointing at the selected host (only meaningful in ssh mode)
+  if (conn.mode === "ssh" && activeName) {
+    const h = sshHosts.find((x) => x.name === activeName);
+    if (h) conn = { ...conn, ssh: { host: h.host, user: h.user, port: h.port, identity: h.identity, remotePort: h.remotePort } };
+  }
+  try { fs.writeFileSync(connFile(), JSON.stringify({ ...conn, ssh_hosts: sshHosts }, null, 2)); } catch { /* ignore */ }
 }
 
 // ------------------------------------------------------------- backend proc
@@ -117,6 +163,86 @@ function startBackend(root: string | null): Promise<string> {
       if (!settled) { settled = true; clearTimeout(timer); reject(e); }
     });
   });
+}
+
+// ------------------------------------------------------------- ssh tunnel
+function knownHostsFile(): string {
+  return path.join(app.getPath("userData"), "known_hosts.json");
+}
+
+function parentWindow(): BrowserWindow | null {
+  return window && !window.isDestroyed() ? window : null;
+}
+
+function promptPassword(target: string, error: string): Promise<string | null> {
+  return showPrompt(parentWindow(), {
+    title: "SSH login",
+    message: `Password for ${target}\nIt is kept in memory for this app session only.`,
+    error,
+    okLabel: "Connect",
+    fields: [{ id: "password", label: "Password", type: "password" }],
+  }).then((v) => (v ? v.password : null));
+}
+
+async function confirmHostKey(hostPort: string, fingerprint: string): Promise<boolean> {
+  const opts = {
+    type: "question" as const,
+    title: "Unknown SSH host",
+    message: `Trust ${hostPort}?`,
+    detail: `The authenticity of this host cannot be verified.\nKey fingerprint: ${fingerprint}\n\nOnly continue if this is the machine you expect.`,
+    buttons: ["Cancel", "Trust and continue"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const win = parentWindow();
+  const r = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  return r.response === 1;
+}
+
+function sendConnError(msg: string) {
+  lastConnError = msg;
+  console.error("[main] connection:", msg);
+  if (window && !window.isDestroyed()) window.webContents.send("conn-error", msg);
+}
+
+// Opens the ssh tunnel and returns the local port. interactive=false (background reconnect)
+// never opens a prompt: it throws SshInteractionRequired when the user is needed.
+async function startTunnel(t: SshTarget, interactive = true): Promise<number> {
+  stopTunnel();
+  console.log(`[main] starting ssh tunnel: ${t.user}@${t.host}:${t.port || 22} -> remote port ${t.remotePort}`);
+  let current: Tunnel | null = null;
+  current = await openTunnel(t, { askPassword: promptPassword, confirmHostKey }, {
+    interactive,
+    passwords: rememberedPasswords,
+    knownHostsFile: knownHostsFile(),
+    onClose: () => {
+      if (!current || tunnel !== current) return; // superseded by a new tunnel / switch
+      tunnel = null;
+      console.log("[main] ssh tunnel closed");
+      // the socket dies with the tunnel; its close event (remoteReconnect) restarts tunnel + ws.
+      // If the socket is already gone, trigger the reconnect here.
+      if (remoteReconnect && !quitting) {
+        if (ws) { try { ws.close(); } catch { /* ignore */ } }
+        else if (window && !window.isDestroyed()) {
+          window.webContents.send("backend-exit", null);
+          scheduleReconnect(`ws://127.0.0.1:${tunnelPort}`, conn.token);
+        }
+      }
+    },
+  });
+  tunnel = current;
+  tunnelPort = current.port;
+  console.log("[main] ssh tunnel up on 127.0.0.1:" + current.port);
+  return current.port;
+}
+
+function stopTunnel() {
+  if (tunnel) {
+    const old = tunnel;
+    tunnel = null;
+    try { old.close(); } catch { /* ignore */ }
+  }
 }
 
 // ------------------------------------------------------------- ws bridge
@@ -189,10 +315,27 @@ function scheduleReconnect(url: string, token: string) {
     reconnectTimer = null;
     if (!remoteReconnect || quitting) return;
     try {
-      await connectWs(url, token);
+      let u = url;
+      if (conn.mode === "ssh" && conn.ssh) {
+        // the tunnel died with (or before) the socket: bring up a fresh one
+        const p = await startTunnel(conn.ssh, false);
+        u = `ws://127.0.0.1:${p}`;
+      }
+      await connectWs(u, token);
       reconnectDelay = 1000;
-      if (window && !window.isDestroyed()) window.webContents.send("backend-url", url);
+      // the initial connect in createWindowAsync can fail and leave backendUrl
+      // unset; without this the renderer's getBackendUrl() stays null forever
+      // and queued projects (openProjectNamed) are never opened
+      backendUrl = u;
+      if (window && !window.isDestroyed()) window.webContents.send("backend-url", u);
     } catch (e) {
+      if (e instanceof SshInteractionRequired) {
+        // a password / host key is needed: stop retrying in the background, let the user reconnect explicitly
+        remoteReconnect = false;
+        sendConnError(`SSH session lost: ${e.message}. Open Settings > Remote server and press Apply & reconnect.`);
+        if (window && !window.isDestroyed()) window.webContents.send("backend-exit", null);
+        return;
+      }
       console.log("[main] remote reconnect failed:", e);
       if (window && !window.isDestroyed()) window.webContents.send("backend-exit", null);
       reconnectDelay = Math.min(reconnectDelay * 2, 15000);
@@ -207,7 +350,7 @@ function lastProjectFile(): string {
 }
 
 function lastProject(): string | null {
-  if (conn.mode === "remote") return null; // the path lives on the server machine
+  if (conn.mode !== "local") return null; // the path lives on the server machine
   const p = lastProjectFile();
   if (fs.existsSync(p)) {
     const last = fs.readFileSync(p, "utf8").trim();
@@ -245,9 +388,26 @@ async function createWindowAsync(root: string | null) {
   window.loadFile(path.join(__dirname, "../renderer/index.html"));
   const startRoot = root ?? lastProject();
   let url: string;
-  if (conn.mode === "remote") {
-    url = `ws://${conn.host}:${conn.port}`;
-    console.log("[main] remote mode, connecting to", url);
+  if (conn.mode === "remote" || conn.mode === "ssh") {
+    if (conn.mode === "ssh") {
+      if (!conn.ssh) {
+        sendConnError("SSH mode is selected but no target is set. Open Settings > Remote server and press Apply & reconnect.");
+        window.webContents.send("backend-exit", null);
+        return;
+      }
+      try {
+        const p = await startTunnel(conn.ssh);
+        url = `ws://127.0.0.1:${p}`;
+      } catch (e: any) {
+        sendConnError(`SSH: ${e?.message ?? e}`);
+        window.webContents.send("backend-exit", null);
+        return;
+      }
+      console.log("[main] ssh mode, tunnel up, connecting to", url);
+    } else {
+      url = `ws://${conn.host}:${conn.port}`;
+      console.log("[main] remote mode, connecting to", url);
+    }
     remoteReconnect = true; // keep trying if the link drops later
     reconnectDelay = 1000;
     try {
@@ -319,6 +479,70 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(window, { properties: ["openFile", "multiSelections"] });
     return r.canceled ? [] : r.filePaths;
   });
+  ipcMain.handle("pick-images", async () => {
+    if (!window) return [];
+    const r = await dialog.showOpenDialog(window, {
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+    });
+    if (r.canceled) return [];
+    const out: { name: string; data_url: string }[] = [];
+    for (const p of r.filePaths) {
+      try {
+        const buf = fs.readFileSync(p);
+        const mime = p.toLowerCase().endsWith(".jpg") || p.toLowerCase().endsWith(".jpeg") ? "image/jpeg"
+          : p.toLowerCase().endsWith(".png") ? "image/png"
+          : p.toLowerCase().endsWith(".gif") ? "image/gif"
+          : p.toLowerCase().endsWith(".webp") ? "image/webp" : "image/bmp";
+        out.push({ name: p.slice(p.lastIndexOf("/") + 1), data_url: `data:${mime};base64,${buf.toString("base64")}` });
+      } catch { /* unreadable file: skip */ }
+    }
+    return out;
+  });
+  // ------------------------------------------------- web page capture
+  // A hidden BrowserWindow renders local web pages so the user can screenshot
+  // them into the chat (capturePage cannot see into iframes of the main window).
+  let captureWin: BrowserWindow | null = null;
+  function captureWindow(): BrowserWindow {
+    if (!captureWin || captureWin.isDestroyed()) {
+      captureWin = new BrowserWindow({
+        show: false,
+        width: 1280,
+        height: 900,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: false },
+      });
+      captureWin.webContents.setAudioMuted(true);
+      captureWin.on("closed", () => { captureWin = null; });
+    }
+    return captureWin;
+  }
+  ipcMain.handle("web-capture", async (_e, url: string): Promise<{ data_url?: string; error?: string }> => {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return { error: `only http(s) urls are supported, got '${u.protocol}'` };
+    } catch (e: any) {
+      return { error: `invalid url: ${e?.message ?? e}` };
+    }
+    const win = captureWindow();
+    const done = new Promise<null>((res) => {
+      const t = setTimeout(() => res(null), 15000);
+      win.webContents.once("did-finish-load", () => { clearTimeout(t); res(null); });
+      win.webContents.once("did-fail-load", (_e2, code, desc) => { clearTimeout(t); (win as any).__loadErr = `${desc} (${code})`; res(null); });
+    });
+    (win as any).__loadErr = null;
+    win.loadURL(url).catch((e) => { (win as any).__loadErr = String(e?.message ?? e); });
+    await done;
+    const loadErr = (win as any).__loadErr as string | null;
+    if (loadErr) return { error: `page failed to load: ${loadErr}` };
+    await new Promise((r) => setTimeout(r, 400)); // let fonts / layout settle
+    const shot = await win.webContents.capturePage();
+    // downscale to keep the payload (and the model's token cost) small
+    const maxEdge = 1568;
+    const b = shot.getSize();
+    const scale = Math.min(1, maxEdge / Math.max(b.width, b.height));
+    const img = scale < 1 ? shot.resize({ width: Math.round(b.width * scale), height: Math.round(b.height * scale) }) : shot;
+    return { data_url: `data:image/png;base64,${img.toPNG().toString("base64")}` };
+  });
   ipcMain.handle("read-file", (_e, p: string): { content?: string; error?: string } => {
     try {
       const buf = fs.readFileSync(p);
@@ -333,6 +557,29 @@ app.whenReady().then(() => {
     try { fs.writeFileSync(lastProjectFile(), p); } catch { /* ignore */ }
   });
   ipcMain.handle("get-connection", () => conn);
+  ipcMain.handle("get-conn-error", () => lastConnError);
+  // named SSH hosts managed in Settings > Remote server (list + selected host)
+  ipcMain.handle("ssh-hosts-list", () => ({ hosts: sshHosts, active: conn.ssh ? conn.ssh.host : null }));
+  ipcMain.handle("ssh-hosts-save", (_e, o: { hosts: any[]; active?: string | null }) => {
+    const hosts = (Array.isArray(o?.hosts) ? o.hosts : []).map(normSshHost).filter((h): h is SshHost => !!h);
+    const active = typeof o?.active === "string" ? o.active : null;
+    if (active && !hosts.some((h) => h.name === active)) return { ok: false, error: "active host not found" };
+    saveSshHosts(hosts, active);
+    return { ok: true };
+  });
+  // "Apply & reconnect" in ssh mode: connect to the host selected in Settings
+  // (the password window follows if the server asks for one)
+  ipcMain.handle("ssh-connect", async (_e, o: { host?: any; token?: string; root?: string | null }) => {
+    const t = normSshHost(o?.host);
+    if (!t) return { ok: false, error: "no SSH host selected (add one in Settings > Remote server)" };
+    reconnecting = true;
+    setTimeout(() => { reconnecting = false; }, 15000);
+    lastConnError = "";
+    return doSetConnection({
+      mode: "ssh", host: conn.host, port: conn.port, token: o?.token ?? conn.token, root: o?.root, force: true,
+      ssh: { host: t.host, user: t.user, port: t.port, identity: t.identity, remotePort: t.remotePort },
+    });
+  });
   ipcMain.handle("conn-mode", () => conn.mode);
   ipcMain.handle("set-connection", async (_e, c: object) => {
     reconnecting = true; // cleared when the old proc's exit handler fires (or on timeout)
@@ -340,18 +587,27 @@ app.whenReady().then(() => {
     return doSetConnection(c);
   });
   async function doSetConnection(c: any): Promise<object> {
-    // switch local <-> remote. c: {mode, host, port, token}
+    // switch local <-> remote <-> ssh. c: {mode, host, port, token, ssh?}
+    const mode = c.mode === "remote" ? "remote" : c.mode === "ssh" ? "ssh" : "local";
     const next: Connection = {
-      mode: c.mode === "remote" ? "remote" : "local",
+      mode,
       host: String(c.host || "127.0.0.1"),
       port: Number(c.port) || 8931,
       token: String(c.token || ""),
     };
-    if (next.mode === conn.mode && next.host === conn.host && next.port === conn.port && next.token === conn.token)
+    if (mode === "ssh") {
+      next.ssh = { host: String(c.ssh?.host || ""), user: String(c.ssh?.user || ""),
+        port: Number(c.ssh?.port) || 22, identity: String(c.ssh?.identity || ""),
+        remotePort: Number(c.ssh?.remotePort) || 8931 };
+      if (!next.ssh.host) return { ok: false, error: "ssh host is required" };
+    }
+    const sameSsh = JSON.stringify(next.ssh ?? null) === JSON.stringify(conn.ssh ?? null);
+    if (!c.force && next.mode === conn.mode && next.host === conn.host && next.port === conn.port && next.token === conn.token && sameSsh)
       return { ok: true, reconnected: false };
     saveConn(next);
     // reconnect in place: drop the old connection, then start/connect the new one
     stopReconnect(); // the old socket's close event must not start a remote reconnect
+    stopTunnel();    // leave ssh mode: drop the old tunnel (new one starts below if needed)
     if (backend) {
       const old = backend;
       backend = null;
@@ -366,8 +622,13 @@ app.whenReady().then(() => {
     backendUrl = null;
     try {
       let url: string;
-      if (next.mode === "remote") {
-        url = `ws://${next.host}:${next.port}`;
+      if (next.mode === "remote" || next.mode === "ssh") {
+        if (next.mode === "ssh" && next.ssh) {
+          const p = await startTunnel(next.ssh);
+          url = `ws://127.0.0.1:${p}`;
+        } else {
+          url = `ws://${next.host}:${next.port}`;
+        }
         remoteReconnect = true;
         reconnectDelay = 1000;
         await connectWs(url, next.token);
@@ -410,9 +671,14 @@ app.whenReady().then(() => {
     closeWs();
     try {
       let url: string;
-      if (conn.mode === "remote") {
-        // remote mode: "restart" = reconnect to the remote server
-        url = `ws://${conn.host}:${conn.port}`;
+      if (conn.mode === "remote" || conn.mode === "ssh") {
+        // remote/ssh mode: "restart" = (re)connect to the remote server
+        if (conn.mode === "ssh" && conn.ssh) {
+          const p = await startTunnel(conn.ssh);
+          url = `ws://127.0.0.1:${p}`;
+        } else {
+          url = `ws://${conn.host}:${conn.port}`;
+        }
         remoteReconnect = true;
         reconnectDelay = 1000;
         await connectWs(url, conn.token);
@@ -448,6 +714,7 @@ function killBackend() {
     stopReconnect();
     closeWs();
   }
+  stopTunnel(); // ssh mode: drop the tunnel (the remote server keeps running)
   const proc = backend;
   if (!proc || proc.exitCode !== null || proc.signalCode) { app.quit(); return; }
   const finish = () => {

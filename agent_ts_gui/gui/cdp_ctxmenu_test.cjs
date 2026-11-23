@@ -20,7 +20,7 @@ const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, ".
   }
 
   // switch to sessions tab
-  await evalJs("[...document.querySelectorAll('#left-tabs .tab')].find(b => b.dataset.tab === 'sessions').click()");
+  await evalJs("[...document.querySelectorAll('#left-rail .tab')].find(b => b.dataset.tab === 'sessions').click()");
   const n = await evalJs("document.querySelectorAll('#session-list li').length");
   console.log("session items:", n);
   if (!n) throw new Error("no sessions in list (need history to test)");

@@ -18,6 +18,8 @@ const VENV_PY = path.join(BACKEND, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ?
 // name -> script. Order matters only for readability.
 const SUITES = {
   connection_regression: "connection_regression_test.cjs",
+  ssh_tunnel: "ssh_tunnel_test.cjs",
+  ssh: "cdp_ssh_test.cjs",
   settings_boot: "cdp_settings_boot_test.cjs",
   boot: "cdp_boot_test.cjs",
   proj: "cdp_proj_test.cjs",
@@ -27,11 +29,15 @@ const SUITES = {
   ctxmenu: "cdp_ctxmenu_test.cjs",
   split: "cdp_split_test.cjs",
   files: "cdp_files_test.cjs",
+  fileattach: "cdp_fileattach_test.cjs",
   theme: "cdp_theme_test.cjs",
   debug: "cdp_debug_test.cjs",
   restart_close: "cdp_restart_close_test.cjs",
   remote: "cdp_remote_test.cjs",
   conn_switch: "cdp_conn_switch_test.cjs",
+  terminal: "cdp_terminal_test.cjs",
+  termcmd: "cdp_termcmd_test.cjs",
+  collapsible: "cdp_collapsible_test.cjs",
 };
 
 function pick() {

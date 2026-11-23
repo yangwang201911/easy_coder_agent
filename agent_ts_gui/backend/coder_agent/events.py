@@ -8,6 +8,7 @@ content_delta       text
 llm_done            usage={prompt,completion,total}, elapsed, ttft
 tool_call           name, args (dict), id
 tool_result         name, ok (bool), text (truncated)
+todo_updated        todos=[{content, status: pending|in_progress|done}] (update_todo)
 command_output      text
 approval_requested  request (ApprovalRequest)
 approval_resolved   allow (bool), auto (bool), reason

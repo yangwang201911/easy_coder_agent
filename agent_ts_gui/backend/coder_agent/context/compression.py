@@ -90,13 +90,36 @@ def trim_tool_outputs(messages: list[dict], max_chars: int) -> list[dict]:
     return out
 
 
+def strip_old_images(messages: list[dict], keep_last: int = 1) -> list[dict]:
+    """Replace image parts in old messages with a text placeholder (they are the
+    biggest token consumers); the newest ``keep_last`` images stay intact."""
+    img_idx = [i for i, m in enumerate(messages)
+               if isinstance(m.get("content"), list)
+               and any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])]
+    drop = set(img_idx[:-keep_last] if keep_last > 0 else img_idx)
+    out = []
+    for i, m in enumerate(messages):
+        if i in drop:
+            parts = [
+                {"type": "text", "text": "[image removed to save context]"}
+                if isinstance(p, dict) and p.get("type") == "image_url" else p
+                for p in m["content"]
+            ]
+            m = {**m, "content": parts}
+        out.append(m)
+    return out
+
+
 def render_transcript(messages: list[dict], per_message_chars: int = 1500) -> str:
     lines = []
     for m in messages:
         role = m.get("role", "?")
         content = m.get("content") or ""
-        if not isinstance(content, str):
-            content = str(content)
+        if isinstance(content, list):  # multimodal (text + image parts)
+            content = "\n".join(
+                p.get("text", f"[image: {p.get('image_url', {}).get('url', '')[:60]}]")
+                for p in content if isinstance(p, dict)
+            )
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {})
             content += f"\n[call {fn.get('name')}({truncate_middle(fn.get('arguments', ''), 400)})]"
@@ -129,9 +152,10 @@ class SummarizeStrategy(CompressionStrategy):
         keep_n = max(1, min(ctx.keep_recent_units, len(units)))
         old_units, recent_units = units[:-keep_n], units[-keep_n:]
 
-        # Step 1: cheap - trim old tool outputs.
-        old = trim_tool_outputs(_flatten(old_units), 600)
-        candidate = system + old + _flatten(recent_units)
+        # Step 1: cheap - trim old tool outputs and drop old images.
+        old = strip_old_images(trim_tool_outputs(_flatten(old_units), 600), keep_last=0)
+        recent = strip_old_images(_flatten(recent_units), keep_last=1)
+        candidate = system + old + recent
         if ctx.count(candidate) <= target_tokens:
             return candidate
 
@@ -153,13 +177,13 @@ class SummarizeStrategy(CompressionStrategy):
             except Exception:  # noqa: BLE001 - fall back to dropping
                 summary_msg = None
         head = system + ([summary_msg] if summary_msg else [])
-        candidate = head + _flatten(recent_units)
+        candidate = head + recent
         if ctx.count(candidate) <= target_tokens:
             return candidate
 
         # Step 3: shrink recent tool outputs, then drop oldest recent units.
         for limit in (3000, 1200, 400):
-            recent = trim_tool_outputs(_flatten(recent_units), limit)
+            recent = strip_old_images(trim_tool_outputs(_flatten(recent_units), limit), keep_last=1)
             candidate = head + recent
             if ctx.count(candidate) <= target_tokens:
                 return candidate
@@ -167,7 +191,7 @@ class SummarizeStrategy(CompressionStrategy):
         note = {"role": "user", "content": "[Some earlier steps were dropped to fit the context window.]"}
         while len(units_left) > 1:
             units_left.pop(0)
-            candidate = head + [note] + trim_tool_outputs(_flatten(units_left), 400)
+            candidate = head + [note] + strip_old_images(trim_tool_outputs(_flatten(units_left), 400), keep_last=1)
             if ctx.count(candidate) <= target_tokens:
                 break
         return candidate

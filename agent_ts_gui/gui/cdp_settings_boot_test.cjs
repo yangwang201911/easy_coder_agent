@@ -14,7 +14,7 @@ let cdp;
   let ready = false;
   while (Date.now() < deadline) {
     if (!clicked) clicked = await cdp.evalJs(`(() => {
-      const button = document.getElementById('settings-btn');
+      const button = document.getElementById('rail-settings');
       if (!button) return false;
       button.click(); return true;
     })()`);
@@ -26,7 +26,7 @@ let cdp;
   assert.ok(ready, `Settings defaults did not load\n${app.getLog()}`);
   assert.ok(app.getLog().includes("[main] ws connected"), app.getLog());
   assert.ok(!app.getLog().includes("backend not connected"), app.getLog());
-  assert.equal(await cdp.evalJs("!!document.getElementById('backend-banner')"), false);
+  assert.equal(await cdp.evalJs("document.getElementById('backend-status').classList.contains('hidden')"), true);
   console.log("PASS: local backend connected and Settings defaults loaded during boot");
 })().catch(e => {
   console.error(e);

@@ -34,7 +34,7 @@ function check(name, cond) {
   check("default body bg rgb(240,240,240)", (await bg()) === "rgb(240, 240, 240)");
 
   // 2) open settings, go to appearance, pick dark
-  await evalJs("document.getElementById('settings-btn').click()");
+  await evalJs("document.getElementById('rail-settings').click()");
   await wait(400);
   check("settings modal shown", await evalJs("!!document.querySelector('.settings')"));
   check("appearance tab exists", await evalJs("!!document.querySelector('.settings .tabs button[data-p=\"appearance\"]')"));

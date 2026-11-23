@@ -13,7 +13,9 @@
     "dist:win": "npm run build && electron-builder --win"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^20.14.0",
+    "@types/ssh2": "^1.15.6",
     "@types/ws": "^8.18.2",
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3",
@@ -21,6 +23,11 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "dompurify": "^3.4.18",
+    "markdown-it": "^15.0.3",
+    "ssh2": "^1.17.0",
     "ws": "^8.22.1"
   },
   "build": {
@@ -29,6 +36,11 @@
     "directories": {
       "output": "../release"
     },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
     "extraResources": [
       {
         "from": "build-resources/backend",
@@ -40,15 +52,25 @@
       }
     ],
     "linux": {
-      "target": ["AppImage", "dir"],
+      "target": [
+        "AppImage",
+        "dir"
+      ],
       "category": "Development",
       "icon": "build-resources/icon-512.png"
     },
     "win": {
-      "target": ["nsis", "dir"],
+      "target": [
+        "nsis",
+        "dir"
+      ],
       "icon": "build-resources/icon.ico"
     },
     "artifactName": "${name}-${version}.${ext}",
+    "asarUnpack": [
+      "**/node_modules/ssh2/**/*.node",
+      "**/node_modules/cpu-features/**/*.node"
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

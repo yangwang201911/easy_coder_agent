@@ -31,17 +31,17 @@ const ts = (label) => console.log(`t=${Date.now() - t0}ms  ${label}`);
   ts(`page DOM ready (toolbar visible) = ${seen}`);
   ts(`first state label observed: ${firstState}`);
 
-  // 3) if no project opens, how fast does the banner appear?
+  // 3) if no project opens, how fast does the backend-down status chip appear?
   let bannerAt = null;
   for (let i = 0; i < 100; i++) {
-    if (await evalJs("!!document.getElementById('backend-banner')")) { bannerAt = Date.now() - t0; break; }
+    if (await evalJs("!document.getElementById('backend-status').classList.contains('hidden')")) { bannerAt = Date.now() - t0; break; }
     await wait(200);
   }
   if (bannerAt !== null) {
-    ts(`banner appeared at t=${bannerAt}ms`);
-    // click Restart to verify the recovery path (flaky backend: first start fails, restart succeeds)
-    await evalJs("document.querySelector('#backend-banner .restart') && document.querySelector('#backend-banner .restart').click()");
-    ts("clicked Restart");
+    ts(`backend-down chip appeared at t=${bannerAt}ms`);
+    // click the chip to verify the recovery path (flaky backend: first start fails, restart succeeds)
+    await evalJs("document.getElementById('backend-status').click()");
+    ts("clicked the backend-down chip");
   }
 
   // 4) project opened: title bar shows "Coder Agent: <root>"
@@ -53,9 +53,9 @@ const ts = (label) => console.log(`t=${Date.now() - t0}ms  ${label}`);
   }
   if (!opened) ts("project NOT opened within 60s");
 
-  // 4) banner must NOT be present (no false alarm)
-  const banner = await evalJs("!!document.getElementById('backend-banner')");
-  ts(`backend banner present (should be false): ${banner}`);
+  // 4) the backend-down chip must NOT be visible (no false alarm)
+  const banner = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
+  ts(`backend-down chip visible (should be false): ${banner}`);
 
   cdp.close();
   await killApp(app);

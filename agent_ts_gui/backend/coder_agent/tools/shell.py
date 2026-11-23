@@ -50,10 +50,11 @@ def run_command(ctx: ToolContext, a: dict) -> str:
     if not cmd:
         raise ToolError("empty command")
     timeout = max(1, min(int(a.get("timeout", DEFAULT_TIMEOUT)), MAX_TIMEOUT))
-    cwd = ctx.resolve(a.get("cwd", "."))
-    if not cwd.is_dir():
-        raise ToolError(f"cwd is not a directory: {a.get('cwd')}")
+    cwd = ctx.resolve(a.get("cwd", ".")).as_posix()
+    return _run_piped(ctx, cmd, cwd, timeout)
 
+
+def _run_piped(ctx: ToolContext, cmd: str, cwd: str, timeout: int) -> str:
     env = dict(os.environ, TERM="dumb", NO_COLOR="1", PAGER="cat", GIT_PAGER="cat")
     if sys.platform == "win32":
         # CREATE_NEW_PROCESS_GROUP: the child gets its own process group so it
@@ -136,8 +137,8 @@ def shell_tools() -> list[Tool]:
     return [
         Tool(
             "run_command",
-            "Run a shell command (bash) in the project. Non-interactive: stdin is closed. "
-            "Use for building (cmake), tests, git status etc. Output is truncated if very long.",
+            "Run a shell command (bash) in the project. Use for building (cmake), "
+            "tests, git status etc. Output is truncated if very long.",
             {
                 "type": "object",
                 "properties": {

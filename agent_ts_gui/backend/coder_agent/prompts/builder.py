@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import platform
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -17,6 +20,34 @@ class PromptSections:
     instructions: bool = True
     indexes: bool = True  # skills / module docs / scoped instructions
     memory: bool = True
+    environment: bool = True  # live facts: time, OS, git branch/dirty state
+
+
+def _git_info(root: Path) -> str:
+    try:
+        out = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root,
+                             capture_output=True, text=True, timeout=5)
+        branch = out.stdout.strip() if out.returncode == 0 else ""
+        dirty = ""
+        if branch:
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                capture_output=True, text=True, timeout=5)
+            if st.returncode == 0 and st.stdout.strip():
+                dirty = " (uncommitted changes)"
+        return f"git branch: {branch}{dirty}" if branch else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _environment_block(root: Path) -> str:
+    lines = [
+        f"time: {time.strftime('%Y-%m-%d %H:%M %Z')}",
+        f"OS: {platform.system()} {platform.release()} ({platform.machine()})",
+    ]
+    git = _git_info(root)
+    if git:
+        lines.append(git)
+    return "\n".join(lines)
 
 
 class PromptBuilder:
@@ -57,4 +88,6 @@ class PromptBuilder:
                 parts.append("# Notes from earlier sessions\n" + mem)
         if extra:
             parts.append(extra)
+        if s.environment:
+            parts.append("# Environment\n" + _environment_block(self.root))
         return "\n\n".join(parts)

@@ -242,6 +242,50 @@ restarted from the toolbar crash banner, and is killed on quit.
 If it cannot start, the window shows a "Backend process exited" banner with
 a Restart button.
 
+## Remote server (GUI on one machine, agent on another)
+
+The GUI can drive a `coder-agent-server` running on another machine. The
+project paths live on the server machine; the GUI is a pure interface.
+Settings > Remote server offers two remote modes:
+
+### Direct (remote mode)
+
+Run the server on the target machine, bound to the network with a token:
+
+```bash
+python -m coder_agent.server --host 0.0.0.0 --port 8931 \
+  --root /path/to/project --token "$(openssl rand -hex 16)"
+```
+
+Then in the GUI set mode **remote**, host/port/token. The token is the only
+protection on the wire — anyone on the network who has it can drive the
+agent, so use a strong one.
+
+### SSH tunnel (ssh mode, recommended)
+
+Like VS Code Remote-SSH: the GUI opens an ssh tunnel
+(`-L <local>:127.0.0.1:<server port> <user>@<host>`) itself and connects
+through the local port. The server only listens on loopback, no port is
+exposed, and no firewall changes are needed.
+
+On the server machine:
+
+```bash
+python -m coder_agent.server --host 127.0.0.1 --port 8931 --root /path/to/project
+```
+
+In the GUI set mode **ssh**, fill ssh host/user (blank = default), ssh port
+(blank = 22), identity file (blank = ssh agent), and the server port.
+Authentication order: ssh-agent / identity file first, then password — if the
+server asks for a password, the GUI pops a dialog to enter it. The password is
+kept in memory for the app session only (so auto-reconnects don't re-prompt)
+and is never written to disk. If the tunnel drops, the GUI reconnects
+automatically (restarts the tunnel + the socket, same backoff as remote mode).
+
+Note: the tunnel is implemented in-process (ssh2), so `~/.ssh/config` aliases
+and `ProxyJump` are not supported — enter the host and port directly.
+Closing the GUI never cancels a running turn on the server.
+
 ## Notes
 
 - The GUI owns the Python backend: it starts it on launch, restarts it on

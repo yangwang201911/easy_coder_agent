@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -16,7 +18,9 @@ from .context import ContextManager
 from .events import EventBus
 from .llm import LLMCancelled, LLMError, LLMProvider, ToolCall, extract_text_tool_calls
 from .llm.prompt_dump import set_agent_id
-from .tools.base import ToolContext, ToolRegistry
+from .llm.server_info import probe_vision
+from .tools.base import ToolContext, ToolOutput, ToolRegistry
+from .tools.interact import todo_block
 from .util import truncate_middle
 
 Approver = Callable[[ApprovalRequest], ApprovalResponse]
@@ -59,6 +63,10 @@ class _ThinkLimit(Exception):
     pass
 
 
+class _Steered(Exception):
+    """A user steer arrived while the model was streaming; the stream is aborted."""
+
+
 class Agent:
     def __init__(
         self,
@@ -73,6 +81,8 @@ class Agent:
         cfg: AgentConfig,
         thinking_cfg: ThinkingConfig,
         cancel: threading.Event,
+        steer: Optional[threading.Event] = None,
+        steer_prompt: Optional[Callable[[], str]] = None,
     ) -> None:
         self.id = agent_id
         set_agent_id(agent_id)  # labelled in prompt dumps (thread-local)
@@ -86,6 +96,11 @@ class Agent:
         self.cfg = cfg
         self.thinking_cfg = thinking_cfg
         self.cancel = cancel
+        # Steer: the user sends a new message while this run is in flight. The
+        # stream is aborted (if streaming) and the message is injected as a
+        # user message at the top of the next step.
+        self.steer = steer
+        self._steer_prompt = steer_prompt
         self.ran_commands = False
         self._fail_streak = 0  # consecutive failing build/run commands
         self._injected: set[str] = set()  # skills already injected during this run
@@ -125,7 +140,7 @@ class Agent:
         start = time.time()
         ttft = None
         limit = self.thinking_cfg.max_think_chars if thinking is not False else 0
-        for ch in self.provider.stream_chat(messages, self._tools, self.cancel, thinking):
+        for ch in self.provider.stream_chat(messages, self._tools, self.cancel, thinking, steer=self.steer):
             if ttft is None and ch.kind in ("thinking", "content", "tool_calls"):
                 ttft = time.time() - start
             if ch.kind == "thinking":
@@ -142,10 +157,14 @@ class Agent:
                 usage = ch.usage
             elif ch.kind == "done":
                 finish = ch.finish_reason
+            elif ch.kind == "status":
+                self._emit("warning", text=ch.text)
         return "".join(content), calls, finish, usage, time.time() - start, ttft
 
     # ------------------------------------------------------------- tool exec
-    def _run_tool(self, tc: ToolCall) -> str:
+    def _run_tool(self, tc: ToolCall) -> tuple[str, list[dict]]:
+        """Run one tool call. Returns ``(text, images)``; images are data-url dicts the
+        caller injects into the conversation (a vision model must see them)."""
         try:
             args = json.loads(tc.arguments) if tc.arguments.strip() else {}
             if not isinstance(args, dict):
@@ -153,27 +172,31 @@ class Agent:
         except (json.JSONDecodeError, ValueError) as e:
             self._emit("tool_call", name=tc.name, args={"raw": tc.arguments}, id=tc.id)
             self._emit("tool_result", name=tc.name, ok=False, text=f"bad arguments: {e}", id=tc.id)
-            return f"ERROR: arguments are not valid JSON ({e}). Send a JSON object matching the tool schema."
+            return f"ERROR: arguments are not valid JSON ({e}). Send a JSON object matching the tool schema.", []
 
         self._emit("tool_call", name=tc.name, args=args, id=tc.id)
         tool = self.registry.get(tc.name)
         if tool is None:
             text = f"ERROR: unknown tool '{tc.name}'. Available: {', '.join(self.registry.names())}"
             self._emit("tool_result", name=tc.name, ok=False, text=text, id=tc.id)
-            return text
+            return text, []
 
         denied = self._authorise(tool, args)
         if denied is not None:
             self._emit("tool_result", name=tc.name, ok=False, text=denied, id=tc.id)
-            return denied
+            return denied, []
 
         if tool.kind == "exec":
             self.ran_commands = True
         self._emit("status", state="running_tool", detail=tc.name)
-        ok, text = self.registry.execute(tc.name, args, self.tool_ctx)
-        text = self._after_tool(tool, args, ok, text)
+        ok, out = self.registry.execute(tc.name, args, self.tool_ctx)
+        text = self._after_tool(tool, args, ok, out.text)
         self._emit("tool_result", name=tc.name, ok=ok, text=text, id=tc.id)
-        return text
+        return text, (out.images if ok else [])
+
+    def _images_supported(self) -> bool:
+        server = getattr(self.provider, "server", None)
+        return server is None or probe_vision(server) is not False
 
     def _after_tool(self, tool, args: dict, ok: bool, text: str) -> str:
         """Discipline for debugging: skill injection on failures and a nudge when commands keep failing."""
@@ -213,7 +236,15 @@ class Agent:
         if tool.kind == "read":
             return None
         ctx = self.tool_ctx
-        if tool.kind == "exec":
+        if tool.kind == "network":
+            kind = "network"
+            subject = tool.target_of(args) if tool.target_of else ""
+            decision = self.policy.check_network(subject)
+        elif tool.kind == "mcp":
+            kind = "mcp"
+            subject = tool.name
+            decision = self.policy.check_mcp(subject)
+        elif tool.kind == "exec":
             kind = "command"
             subject = tool.command_of(args) if tool.command_of else args.get("command", "")
             try:
@@ -243,11 +274,16 @@ class Agent:
         req = ApprovalRequest(
             kind=kind,
             tool=tool.name,
-            title=subject if kind == "write" else f"Run command ({decision.reason})",
+            title=subject if kind == "write" else (
+                f"Network: {subject}" if kind == "network"
+                else f"MCP tool: {subject}" if kind == "mcp" else f"Run command ({decision.reason})"
+            ),
             detail=detail,
             args=args,
             suggested_rule=self.policy.suggest_rule(
-                kind, {"path": subject} if kind == "write" else {"command": subject}),
+                kind, {"path": subject} if kind == "write"
+                else {"host": subject} if kind == "network"
+                else {"name": subject} if kind == "mcp" else {"command": subject}),
         )
         self._emit("status", state="waiting_user", detail=req.title)
         self._emit("approval_requested", request=req)
@@ -278,16 +314,33 @@ class Agent:
             for step in range(1, self.cfg.max_steps + 1):
                 if self.cancel.is_set():
                     raise LLMCancelled()
+                # a steer arrived (stream aborted on the previous step, or queued
+                # while a tool was running): inject the user's message and continue
+                if self.steer is not None and self.steer.is_set():
+                    self.steer.clear()
+                    prompt = self._steer_prompt() if self._steer_prompt else ""
+                    add({"role": "user", "content": prompt})
+                    self._emit("steer_injected", text=prompt)
                 self._maybe_compress(messages, on_compact)
                 self._emit("status", state="waiting_model", detail=f"step {step}")
 
                 est_raw = self.ctx_mgr.counter.count_raw(messages, self._tools)
+                # Ephemeral per-step reminder: the current todo checklist (not persisted,
+                # appended at the end where the model attends most).
+                todo = todo_block(self.tool_ctx.todos)
+                view = (messages + [{"role": "user", "content": todo}]) if todo else messages
                 try:
                     try:
-                        text, calls, finish, usage, elapsed, ttft = self._call_llm(messages, None)
+                        text, calls, finish, usage, elapsed, ttft = self._call_llm(view, None)
                     except _ThinkLimit:
                         self._emit("warning", text="thinking too long - retrying with thinking disabled")
-                        text, calls, finish, usage, elapsed, ttft = self._call_llm(messages, False)
+                        text, calls, finish, usage, elapsed, ttft = self._call_llm(view, False)
+                    except LLMCancelled:
+                        # the stream was aborted by a steer (cancel is checked at the
+                        # top of the step): the steer message is injected next step
+                        if self.steer is not None and self.steer.is_set():
+                            continue
+                        raise
                 except LLMError as e:
                     self._emit("error", text=str(e))
                     return AgentResult("error", final_text, step, str(e))
@@ -327,22 +380,57 @@ class Agent:
                     self._emit("agent_finished", status="done", steps=step)
                     return AgentResult("done", text, step)
 
+                # Split the batch: read-only tools run in parallel (they cannot
+                # interfere with each other), everything else runs one by one in
+                # the original order. Results are appended in call order.
+                def _kind_of(tc: ToolCall) -> str:
+                    t = self.registry.get(tc.name)
+                    return t.kind if t is not None else "exec"  # unknown tools stay serial
+
+                parallel = [tc for tc in calls if _kind_of(tc) == "read"]
+                serial = [tc for tc in calls if tc not in parallel]
+                results: dict[str, tuple[str, list[dict]]] = {}
+                if len(parallel) > 1:
+                    with ThreadPoolExecutor(max_workers=min(8, len(parallel)), thread_name_prefix="tool") as pool:
+                        futs = {pool.submit(self._run_tool, tc): tc for tc in parallel}
+                        for fut in futs:
+                            tc = futs[fut]
+                            results[tc.id] = fut.result()
+                else:
+                    for tc in parallel:  # 0 or 1 read tool: run it inline
+                        results[tc.id] = self._run_tool(tc)
+                for tc in serial:
+                    results[tc.id] = self._run_tool(tc)
                 for tc in calls:
                     if self.cancel.is_set():
                         add({"role": "tool", "tool_call_id": tc.id, "content": "Cancelled by the user before running."})
                         continue
                     key = tc.name + "|" + tc.arguments
                     seen[key] = seen.get(key, 0) + 1
-                    if seen[key] > self.cfg.loop_limit:
+                    near = [k for k in seen if k != key and k.startswith(tc.name + "|")
+                            and difflib.SequenceMatcher(None, k, key).ratio() > 0.85]
+                    if seen[key] > self.cfg.loop_limit or (near and seen[key] > 1):
                         strikes += 1
                         result = (
-                            "ERROR: you already made this exact call several times with the same result. "
-                            "Stop repeating it: try a different approach or finish with what you have."
+                            "ERROR: you already made this call (or a nearly identical one) several times with "
+                            "the same result. Stop repeating it: try a different approach or finish with what you have."
                         )
                         self._emit("warning", text=f"repeated call to {tc.name}")
+                        images = []
                     else:
-                        result = self._run_tool(tc)
+                        result, images = results[tc.id]
+                    if images and not self._images_supported():
+                        result += "\n[image omitted: the configured model is text-only]"
+                        images = []
                     add({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    if images:
+                        # a tool produced a picture (e.g. browser_take_screenshot): hand it to the
+                        # model as a user message with image parts - tool-role messages
+                        # cannot carry images in the OpenAI wire format
+                        add({"role": "user", "content": [
+                            {"type": "text", "text": f"[result of {tc.name}: see the attached image]"},
+                            *[{"type": "image_url", "image_url": {"url": im["data_url"]}} for im in images],
+                        ]})
                 if strikes >= 3:
                     self._emit("agent_finished", status="loop", steps=step)
                     return AgentResult("loop", final_text, step, "agent kept repeating the same calls")

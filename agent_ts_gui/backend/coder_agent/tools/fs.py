@@ -6,13 +6,19 @@ import difflib
 import fnmatch
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Optional
 
 from .base import Tool, ToolContext, ToolError
 
 IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".agent", ".idea", ".vscode", ".cache"}
 MAX_READ_LINES = 500
 MAX_FILE_BYTES = 2_000_000
+HAS_RG = shutil.which("rg") is not None
+MAX_GREP_MATCHES = 100
+MAX_GREP_CONTEXT = 10
 
 
 def _walk(root: Path):
@@ -86,15 +92,47 @@ def find_files(ctx: ToolContext, a: dict) -> str:
 
 
 # --------------------------------------------------------------- grep_search
-def grep_search(ctx: ToolContext, a: dict) -> str:
-    pattern = a["pattern"]
-    base = ctx.resolve(a.get("path", "."))
-    flags = 0 if a.get("case_sensitive", False) else re.IGNORECASE
+def _grep_rg(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool,
+             case_sensitive: bool, glob: Optional[str], context_lines: int) -> str:
+    """Fast path: system ripgrep (honours .gitignore, skips binaries, parallel)."""
+    cmd = ["rg", "--line-number", "--color", "never", "--max-count", "500",
+           "--no-heading"]
+    if not is_regex:
+        cmd.append("--fixed-strings")
+    if not case_sensitive:
+        cmd.append("-i")
+    if context_lines:
+        cmd += ["-C", str(context_lines)]
+    if glob:
+        cmd += ["--glob", glob]
+    search_path = base if base == ctx.root else ctx.rel(base)
+    cmd += ["--", pattern, search_path]
     try:
-        rx = re.compile(pattern if a.get("is_regex", False) else re.escape(pattern), flags)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              cwd=str(ctx.root), env={**os.environ, "NO_COLOR": "1"})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ToolError(f"ripgrep failed: {e}")
+    if proc.returncode not in (0, 1):  # 1 = no matches
+        raise ToolError(f"ripgrep failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
+    lines = proc.stdout.splitlines()
+    out: list[str] = []
+    for ln in lines:
+        if not ln.strip():
+            continue
+        out.append(ln)
+        if len(out) >= MAX_GREP_MATCHES * (1 + 2 * max(0, context_lines)):
+            break
+    return "\n".join(out) if out else "(no matches)"
+
+
+def _grep_py(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool,
+             case_sensitive: bool, glob: Optional[str], context_lines: int) -> str:
+    """Fallback: pure-Python scan (no ripgrep installed)."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        rx = re.compile(pattern if is_regex else re.escape(pattern), flags)
     except re.error as e:
         raise ToolError(f"invalid regex: {e}")
-    glob = a.get("glob")
     files = [base] if base.is_file() else _walk(base)
     hits: list[str] = []
     for f in files:
@@ -108,12 +146,30 @@ def grep_search(ctx: ToolContext, a: dict) -> str:
             continue
         if b"\x00" in data[:4096]:
             continue
-        for n, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        for n, line in enumerate(lines, 1):
             if rx.search(line):
-                hits.append(f"{ctx.rel(f)}:{n}: {line.strip()[:200]}")
-                if len(hits) >= 100:
-                    return "\n".join(hits) + "\n...(truncated at 100 matches)"
+                lo, hi = max(1, n - context_lines), min(len(lines), n + context_lines)
+                for i in range(lo, hi + 1):
+                    mark = ":" if i == n else "-"
+                    hits.append(f"{ctx.rel(f)}:{i}{mark} {lines[i - 1].strip()[:200]}")
+                if context_lines and hi < len(lines):
+                    hits.append("--")
+                if len(hits) >= MAX_GREP_MATCHES * (1 + 2 * context_lines):
+                    return "\n".join(hits) + f"\n...(truncated at {MAX_GREP_MATCHES} matches)"
     return "\n".join(hits) if hits else "(no matches)"
+
+
+def grep_search(ctx: ToolContext, a: dict) -> str:
+    pattern = a["pattern"]
+    base = ctx.resolve(a.get("path", "."))
+    is_regex = bool(a.get("is_regex", False))
+    context_lines = max(0, min(int(a.get("context_lines", 0)), MAX_GREP_CONTEXT))
+    if HAS_RG:
+        return _grep_rg(ctx, a, base, pattern, is_regex, bool(a.get("case_sensitive", False)),
+                        a.get("glob"), context_lines)
+    return _grep_py(ctx, a, base, pattern, is_regex, bool(a.get("case_sensitive", False)),
+                    a.get("glob"), context_lines)
 
 
 # --------------------------------------------------------------- write_file
@@ -221,6 +277,7 @@ def fs_tools() -> list[Tool]:
                 "required": ["path"],
             },
             read_file,
+            cacheable=True,
         ),
         Tool(
             "list_dir",
@@ -258,6 +315,7 @@ def fs_tools() -> list[Tool]:
                     "glob": {"type": "string", "description": "only files matching, e.g. '*.hpp'"},
                     "is_regex": {"type": "boolean"},
                     "case_sensitive": {"type": "boolean"},
+                    "context_lines": {"type": "integer", "description": f"lines of context around each match, 0-{MAX_GREP_CONTEXT}"},
                 },
                 "required": ["pattern"],
             },

@@ -37,12 +37,34 @@ from .config import AppConfig, load_config, save_config
 from .context.compression import available_strategies
 from .engine import Engine, _serialised
 from .events import EventBus
-from .llm import LLMProvider, create_provider, fetch_context_info
+from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
+from .terminal import Terminal, open_terminal
 
 ProviderFactory = Optional[Callable[[], LLMProvider]]  # injectable for tests
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # base64 data_url size cap per attachment
+
+
+def _validate_images(raw: Any) -> Optional[list[dict]]:
+    """Validate GUI image attachments: [{"name": str, "data_url": "data:image/..."}]."""
+    if not raw:
+        return None
+    if not isinstance(raw, list) or len(raw) > 5:
+        raise ValueError("images must be a list of at most 5 attachments")
+    out: list[dict] = []
+    for img in raw:
+        if not isinstance(img, dict):
+            raise ValueError("each image must be an object")
+        url = img.get("data_url")
+        if not isinstance(url, str) or not url.startswith("data:image/") or "," not in url:
+            raise ValueError("image data_url must be a data:image/... URL")
+        if len(url) > MAX_IMAGE_BYTES:
+            raise ValueError(f"image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
+        out.append({"name": str(img.get("name") or "image"), "data_url": url})
+    return out
 
 
 # --------------------------------------------------------------- async asks
@@ -84,6 +106,12 @@ class ApprovalAsk:
         self.server = server
         self._next = 0
 
+    def ask_user(self, data: dict) -> dict:
+        req_id, p = self.server.question("ask", {"dismissed": True}, dict(data))
+        self.server.push_event("ask_user_requested", "main", dict(data, req_id=req_id))
+        resp = self.server.wait(p)
+        return resp if isinstance(resp, dict) else {"dismissed": True}
+
     def ask(self, req: ApprovalRequest) -> ApprovalResponse:
         data = dict(_jsonable(req))
         req_id, p = self.server.question("approval", ApprovalResponse(False, "cancelled by user"), data)
@@ -96,7 +124,15 @@ class ApprovalAsk:
                 str(resp.get("feedback", "")),
                 str(resp.get("remember_rule", "")),
                 str(resp.get("remember_scope", "project")),
+                bool(resp.get("session_approve", False)),
             )
+        if resp.session_approve and resp.allow:
+            # "allow all in this session": everything not denied runs without asking
+            # until the session ends (a new session / project / server restart resets it)
+            e = self.server.engine
+            if e is not None:
+                e.policy.session_approve = True
+                self.server.push_event("session_approve", "main", {"active": True})
         return resp
 
 
@@ -147,6 +183,9 @@ class Server:
         self._busy = False
         self._counter = 0
         self._unsubscribe = None  # EventBus subscription of the current engine
+        self.terminals: dict[str, Terminal] = {}
+        self._terminals_lock = threading.Lock()
+        self._term_seq = 0
         self._methods: dict[str, Callable[..., Any]] = self._register()
 
     # ------------------------------------------------------------- plumbing
@@ -158,6 +197,7 @@ class Server:
             "list_dir": self.list_dir,
             "submit": self.submit,
             "submit_plan": self.submit_plan,
+            "steer": self.steer,
             "cancel": self.cancel,
             "rewind": self.rewind,
             "edit_and_resubmit": self.edit_and_resubmit,
@@ -188,6 +228,11 @@ class Server:
             "file_tree": self.file_tree,
             "file_content": self.file_content,
             "turn_file_original": self.turn_file_original,
+            "terminal_open": self.terminal_open,
+            "terminal_write": self.terminal_write,
+            "terminal_resize": self.terminal_resize,
+            "terminal_close": self.terminal_close,
+            "terminal_list": self.terminal_list,
         }
 
     @property
@@ -210,8 +255,13 @@ class Server:
         """Thread-safe EventBus subscriber -> queued WebSocket send."""
         if self.ws is None or self.loop is None:
             return
-        payload = {"event": kind, "agent_id": agent_id, "data": _jsonable(data), "ts": time.time()}
-        asyncio.run_coroutine_threadsafe(self.send(payload), self.loop)
+        try:
+            payload = {"event": kind, "agent_id": agent_id, "data": _jsonable(data), "ts": time.time()}
+            asyncio.run_coroutine_threadsafe(self.send(payload), self.loop)
+        except RuntimeError:
+            # the event loop is already closed (server shutting down): drop the
+            # event rather than letting the bus subscriber kill the worker thread
+            pass
 
     def _on_bus_event(self, ev) -> None:
         """EventBus subscriber (fn(ev)) -> push_event."""
@@ -280,16 +330,20 @@ class Server:
                 "effort": e.config.thinking.effort,
                 "config": _jsonable(e.config),
                 "resumed": True,
+                "session_approve": e.policy.session_approve,
             }
         cfg = load_config(root)
         session = Session.load(root, session_id) if session_id else None
         if self._unsubscribe is not None:
             self._unsubscribe()
+        if self.engine is not None:
+            self.engine.close()
         self.engine = Engine(cfg, root, EventBus(), approver=None, session=session)
         self.bus = self.engine.bus
         self.approvals = ApprovalAsk(self)
         self.plans = PlanAsk(self)
         self.engine.approver = _serialised(self.approvals.ask)
+        self.engine.asker = _serialised(self.approvals.ask_user)
         if self.provider_factory is not None:
             self.engine._provider_override = self.provider_factory()
         self._unsubscribe = self.bus.subscribe(self._on_bus_event)
@@ -301,12 +355,14 @@ class Server:
             "task_types": self.engine.task_types.names(),
             "effort": cfg.thinking.effort,
             "config": _jsonable(cfg),
+            "session_approve": False,  # a new engine: the session-wide auto-approve is reset
         }
 
     def submit(self, p: dict) -> dict:
         e = self._require_engine()
         prompt, task_type = p.get("prompt", ""), p.get("task_type")
-        return self._start_turn(lambda: e.submit(prompt, task_type))
+        images = _validate_images(p.get("images"))
+        return self._start_turn(lambda: e.submit(prompt, task_type, images))
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.
@@ -333,6 +389,21 @@ class Server:
         e = self._require_engine()
         goal = p.get("goal", "")
         return self._start_turn(lambda: e.submit_plan(goal, self.plans.confirm_plan, self.plans.confirm_stage))
+
+    def steer(self, p: dict) -> dict:
+        """Queue a user message for the running turn (the GUI's "send while running")."""
+        e = self._require_engine()
+        prompt = str(p.get("prompt", "")).strip()
+        if not prompt:
+            raise ValueError("empty steer prompt")
+        e.steer(prompt)
+        # test hook: the scripted fake provider blocks its first stream on this
+        # gate (it raises LLMCancelled when the steer event fires). The steer is
+        # set BEFORE the gate is released, so the provider unblocks and sees it.
+        gate = getattr(e._provider_override, "steer_gate", None)
+        if gate is not None:
+            gate.set()
+        return {"ok": True}
 
     def cancel(self, p: dict) -> dict:
         self._require_engine().cancel()
@@ -413,7 +484,8 @@ class Server:
         cfg = AppConfig.model_validate(p.get("config") or {})
         models = create_provider(cfg).list_models()
         info = fetch_context_info(cfg.server)
-        return {"models": models, "context": _jsonable(info), "context_text": info.describe()}
+        return {"models": models, "context": _jsonable(info), "context_text": info.describe(),
+                "vision": probe_vision(cfg.server)}
 
     def context_info(self, p: dict) -> dict:
         e = self._require_engine()
@@ -512,6 +584,59 @@ class Server:
         rel = p["path"]
         original = s.snapshots.snapshot_content(p["turn_id"], rel)
         return {"path": rel, "turn_id": p["turn_id"], "original": original}
+
+    # ------------------------------------------------------------- terminals
+    def _term(self, term_id: str) -> Terminal:
+        with self._terminals_lock:
+            t = self.terminals.get(term_id)
+        if t is None:
+            raise RuntimeError(f"no such terminal {term_id!r}")
+        return t
+
+    def terminal_open(self, p: dict) -> dict:
+        with self._terminals_lock:
+            self._term_seq += 1
+            term_id = f"term-{self._term_seq}"
+        cols = int(p.get("cols") or 80)
+        rows = int(p.get("rows") or 24)
+        cwd = p.get("cwd") or (str(self.root) if self.root else None)
+        term = open_terminal(term_id, shell=p.get("shell"), cwd=cwd, cols=cols, rows=rows)
+        # push_event is (kind, agent_id, data); the terminal only knows kind+data
+        term.start(lambda kind, data: self.push_event(kind, "terminal", data))
+        # drop finished terminals from the registry (the GUI keeps its own copy)
+        term.on_exit = lambda t: self.terminals.pop(t.id, None)
+        with self._terminals_lock:
+            self.terminals[term_id] = term
+        return {"id": term_id, "shell": term.shell, "cwd": term.cwd,
+                "cols": cols, "rows": rows}
+
+    def terminal_write(self, p: dict) -> dict:
+        t = self._term(p["id"])
+        if t.closed:
+            return {"ok": False, "error": "terminal has exited"}
+        t.write(p.get("data") or "")
+        return {"ok": True}
+
+    def terminal_resize(self, p: dict) -> dict:
+        self._term(p["id"]).resize(int(p.get("cols") or 80), int(p.get("rows") or 24))
+        return {"ok": True}
+
+    def terminal_close(self, p: dict) -> dict:
+        with self._terminals_lock:
+            t = self.terminals.pop(p["id"], None)
+        if t is None:
+            return {"ok": True}  # already gone (exited)
+        t.close()
+        return {"ok": True}
+
+    def terminal_list(self, p: dict) -> dict:
+        with self._terminals_lock:
+            terms = [
+                {"id": t.id, "shell": t.shell, "cwd": t.cwd, "created": t.created,
+                 "closed": t.closed, "exit_code": t.exit_code}
+                for t in self.terminals.values()
+            ]
+        return {"terminals": terms}
 
     def session_summaries(self, p: dict) -> dict:
         e = self._require_engine()
@@ -691,7 +816,8 @@ class Server:
         # session_detail / the live event stream when it reconnects. Pending
         # questions are auto-answered by attach() if they outlive the gap.
 
-    _KIND_BY_PREFIX = {"approval": "approval_requested", "plan": "plan_review_requested", "stage": "stage_confirm_requested"}
+    _KIND_BY_PREFIX = {"approval": "approval_requested", "plan": "plan_review_requested",
+                       "stage": "stage_confirm_requested", "ask": "ask_user_requested"}
 
     def _question_kind(self, req_id: str) -> str:
         return self._KIND_BY_PREFIX.get(req_id.split("-", 1)[0], "approval_requested")
@@ -768,7 +894,13 @@ def run(argv: list[str], provider_factory: ProviderFactory = None) -> int:
     async def _run() -> None:
         server = Server(Path(args.root) if args.root else None, provider_factory)
         server.token = args.token or ""
-        srv = await websockets.serve(lambda ws, *args: handler(ws, server), args.host, args.port)
+        # default max_size is 1 MiB, which a single attached image (sent as a
+        # base64 data URL in the submit RPC) can exceed. The defaults
+        # ping_interval=20/ping_timeout=20 drop the GUI after 20s of silence
+        # (the event loop can be busy during a long tool call), so relax them.
+        srv = await websockets.serve(lambda ws, *args: handler(ws, server), args.host, args.port,
+                                     max_size=64 * 1024 * 1024,
+                                     ping_interval=30, ping_timeout=180)
         port = srv.sockets[0].getsockname()[1]
         # 0.0.0.0 is not a connectable address: print the machine's real IPs
         # so the GUI operator knows what to put in the Connection settings.

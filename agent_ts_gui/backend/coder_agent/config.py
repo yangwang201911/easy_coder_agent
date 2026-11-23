@@ -59,6 +59,7 @@ class AgentConfig(BaseModel):
     auto_skills: bool = True  # inject skills whose `triggers` match a failing command's output
     failure_hint_after: int = 2  # consecutive failed commands before the "list suspects" nudge (0 = off)
     gdb_hint_after: int = 4  # consecutive failed commands before the "use the debugger" nudge (0 = off)
+    memory_extraction: bool = True  # after each turn, ask the model for durable facts worth remembering
 
 
 class OrchestratorConfig(BaseModel):

@@ -3,14 +3,14 @@ import { build } from "esbuild";
 import { cpSync, rmSync } from "node:fs";
 
 await build({
-  entryPoints: ["src/main/index.ts", "src/preload/index.ts"],
+  entryPoints: ["src/main/index.ts", "src/preload/index.ts", "src/preload/prompt.ts"],
   outdir: "dist",
   outbase: "src",
   bundle: true,
   platform: "node",
   format: "cjs",
   target: "node20",
-  external: ["electron"],
+  external: ["electron", "ssh2"], // ssh2 ships native .node bindings: keep it in node_modules
 });
 
 // renderer: copy static assets, then bundle app.ts over them

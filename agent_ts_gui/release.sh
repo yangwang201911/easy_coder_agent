@@ -31,6 +31,21 @@ ls -l gui/build-resources/backend
 
 echo "==> building GUI (electron-builder)"
 cd gui
+# make sure npm dependencies are present and up to date (a branch switch
+# updates package.json but not node_modules; esbuild then fails with
+# "Could not resolve ..." for the new packages)
+if [ ! -d node_modules ] || [ "$(ls -t package.json package-lock.json 2>/dev/null | head -1)" -nt node_modules ]; then
+    echo "node_modules is missing or stale (package.json changed), running npm install..."
+    npm install
+fi
+# electron binary must be in place (its postinstall downloads from GitHub,
+# which often fails on restricted networks - see README "China / restricted network")
+if [ ! -f node_modules/electron/dist/electron ]; then
+    echo "ERROR: node_modules/electron/dist/electron is missing." >&2
+    echo "Download the electron zip manually (see README 'China / restricted network')" >&2
+    echo "and extract it into node_modules/electron/dist, then re-run release.sh." >&2
+    exit 1
+fi
 npm run dist:linux
 
 echo "==> collecting server artifact"

@@ -46,3 +46,14 @@ deny = [
 default = "ask"            # ask | deny
 allow = ["build/*", "tmp/*"]
 deny = [".git/*"]
+
+[network]
+default = "ask"            # ask | deny: web_search / web_fetch / browser to public hosts
+local_auto = true          # loopback and private addresses need no approval
+allow = []                 # host globs, e.g. "api.search.brave.com"
+deny = []
+
+[mcp]
+default = "ask"            # ask | deny: MCP tools (names mcp__<server>__<tool>)
+allow = []                 # tool-name globs, e.g. "mcp__fs__read_*"
+deny = []

@@ -43,18 +43,24 @@ class PlanResult:
 
 
 def _waves(stage: list[SubTask]) -> list[list[SubTask]]:
-    """Split a stage so that no two subtasks in one wave declare the same file hint."""
-    waves: list[tuple[list[SubTask], set[str]]] = []
+    """Split a stage so that no two subtasks in one wave declare the same file hint.
+
+    A subtask the planner marked ``parallel_safe=False`` (e.g. a whole-project
+    build) gets its own wave and is never joined by later subtasks.
+    """
+    waves: list[tuple[list[SubTask], set[str], bool]] = []  # members, used hints, locked
     for st in stage:
         hints = {f.strip("/").lower() for f in st.files if f}
-        for members, used in waves:
+        for members, used, locked in waves:
+            if locked or st.parallel_safe is False:
+                continue
             if not (hints & used):
                 members.append(st)
                 used |= hints
                 break
         else:
-            waves.append(([st], set(hints)))
-    return [m for m, _ in waves]
+            waves.append(([st], set(hints), st.parallel_safe is False))
+    return [m for m, _, _ in waves]
 
 
 class Orchestrator:
@@ -111,6 +117,7 @@ class Orchestrator:
                 agent_id=aid,
                 max_output_chars=self.cfg.context.tool_output_max_chars,
                 extra_roots=e.policy.extra_roots,
+                ask_user=e.asker,
             )
             agent = Agent(
                 aid, self.provider, registry, tool_ctx, e.policy, e.approver,

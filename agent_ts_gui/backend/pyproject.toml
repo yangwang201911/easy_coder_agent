@@ -11,6 +11,8 @@ dependencies = [
     "openai>=1.40",
     "pydantic>=2.5",
     "websockets>=12.0",
+    "mcp>=1.0",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

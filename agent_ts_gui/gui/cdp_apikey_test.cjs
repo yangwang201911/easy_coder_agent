@@ -21,7 +21,7 @@ const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, ".
   if (!opened) throw new Error("project not opened");
 
   // open settings dialog
-  await evalJs("document.querySelector('#settings-btn') && document.querySelector('#settings-btn').click()");
+  await evalJs("document.querySelector('#rail-settings') && document.querySelector('#rail-settings').click()");
   for (let i = 0; i < 50; i++) {
     if (await evalJs("!!document.querySelector('#modal .settings')")) break;
     await wait(100);

@@ -31,7 +31,7 @@ class FakeProvider:
             {"content": "all done"},
         ]
 
-    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None):
+    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None, steer=None):
         from coder_agent.llm import LLMChunk, ToolCall, Usage
         reply = self.script.pop(0) if self.script else {"content": "done"}
         if reply.get("content"):
@@ -48,8 +48,25 @@ class FakeProvider:
 
 # ---------------------------------------------------------------------------
 @pytest.fixture
-def server_process(tmp_path, monkeypatch):
-    """Start the server with the fake provider and yield (url, proc)."""
+def server_process(tmp_path, request):
+    """Start the server with the fake provider and yield (url, proc).
+
+    ``request.param`` (optional) is a string: leading digits set how many
+    write_file calls the fake provider scripts (default 1), and "FAKE_STEER"
+    makes the first stream block until a steer arrives; a tuple
+    ``(n_writes, block_n)`` blocks the n-th stream (used by the steer test)."""
+    param = getattr(request, "param", None)
+    fake_ask = param == "ask"
+    if param is None or fake_ask:
+        n_writes, fake_steer = 1, ""
+    elif isinstance(param, int):
+        n_writes, fake_steer = param, ""
+    elif isinstance(param, tuple):
+        n_writes, fake_steer = param[0], str(param[1])
+    else:
+        n_writes = int("".join(ch for ch in param if ch.isdigit()) or 1)
+        fake_steer = param
+    block_n = int(fake_steer) if fake_steer else 0
     home = tmp_path / "home"
     project = tmp_path / "proj"
     project.mkdir()
@@ -57,26 +74,62 @@ def server_process(tmp_path, monkeypatch):
     (project / ".agent").mkdir()
     (project / ".agent" / "approval.toml").write_text("[paths]\nauto_approve = false\n", encoding="utf-8")
 
-    env = dict(os.environ, CODER_AGENT_HOME=str(home))
+    env = dict(os.environ, CODER_AGENT_HOME=str(home), FAKE_WRITES=str(n_writes),
+               FAKE_STEER=fake_steer, FAKE_ASK="1" if fake_ask else "")
     code = (
-        "import asyncio, json, sys\n"
+        "import asyncio, json, os, sys, threading\n"
         "from coder_agent.llm import LLMProvider\n"
         "from coder_agent.server import Server, handler, run\n"
         "import websockets\n"
         "class Fake(LLMProvider):\n"
         "    def __init__(self):\n"
         "        self.script = [\n"
-        "            {'tool_calls': [('write_file', {'path': 'hello.txt', 'content': 'hi'})]},\n"
-        "            {'content': 'all done'},\n"
-        "        ]\n"
-        "    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None):\n"
-        "        from coder_agent.llm import LLMChunk, ToolCall, Usage\n"
-        "        reply = self.script.pop(0) if self.script else {'content': 'done'}\n"
-        "        if reply.get('content'):\n"
-        "            yield LLMChunk('content', reply['content'])\n"
-        "        calls = [ToolCall(f'c{i}', n, json.dumps(a)) for i, (n, a) in enumerate(reply.get('tool_calls', []))]\n"
-        "        if calls:\n"
-        "            yield LLMChunk('tool_calls', tool_calls=calls)\n"
+        "            {'content': 'writing', 'tool_calls': [('write_file', {'path': 'hello.txt', 'content': 'hi'})]}\n"
+        "            for _ in range(int(os.environ.get('FAKE_WRITES', '1')))\n"
+        "        ] + [{'content': 'all done'}]\n"
+        "        if os.environ.get('FAKE_ASK'):\n"
+        "            self.script = [{'content': 'asking', 'tool_calls': [('ask_user', {'question': 'Done?', 'options': ['yes', 'no']})]},\n"
+        "                           {'content': 'got it'}]\n"
+        "        self.steer_gate = threading.Event()  # set by the steer RPC (test hook)\n"
+        "        self._n_calls = 0\n"
+        "        self._block_n = int(os.environ.get('FAKE_STEER', '0') or 0)  # block this stream n\n"
+        "        self._hello_done = False\n"
+        "        self._bye_done = False\n"
+        "        self._parked = set()  # call indexes that already parked (a re-run parks again)\n"
+        "    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None, steer=None):\n"
+        "        from coder_agent.llm import LLMChunk, ToolCall, Usage, LLMCancelled\n"
+        "        self._n_calls += 1\n"
+        "        if self._block_n:  # steer test: the model obeys the steer once it is in the conversation\n"
+        "            steered = any('bye' in str(m.get('content', '')) for m in messages)\n"
+        "            if steered and not self._bye_done:  # write bye.txt exactly once, then finish\n"
+        "                self._bye_done = True\n"
+        "                calls = [ToolCall('c0', 'write_file', json.dumps({'path': 'bye.txt', 'content': 'hi'}))]\n"
+        "            elif not self._hello_done:  # the original request: write hello.txt once\n"
+        "                self._hello_done = True\n"
+        "                calls = [ToolCall('c0', 'write_file', json.dumps({'path': 'hello.txt', 'content': 'hi'}))]\n"
+        "            else:\n"
+        "                calls = []\n"
+        "            # the blocked stream yields 'parked' so the test knows it is mid-stream\n"
+        "            # and safe to steer; a re-run of the same blocked call parks again\n"
+        "            blocked = self._n_calls == self._block_n and self._n_calls not in self._parked\n"
+        "            if blocked:\n"
+        "                self._parked.add(self._n_calls)\n"
+        "            yield LLMChunk('content', 'parked' if blocked else ('writing' if calls else 'all done'))\n"
+        "            if blocked:  # a long stream: park until a steer arrives\n"
+        "                self.steer_gate.clear()\n"
+        "                while not self.steer_gate.is_set():\n"
+        "                    self.steer_gate.wait(timeout=0.05)\n"
+        "                if steer is not None and steer.is_set():\n"
+        "                    raise LLMCancelled()  # the steer aborted the (long) stream\n"
+        "            if calls:\n"
+        "                yield LLMChunk('tool_calls', tool_calls=calls)\n"
+        "        else:  # scripted: reply by call number (a re-run gets the same reply)\n"
+        "            reply = self.script[self._n_calls - 1] if self._n_calls <= len(self.script) else {'content': 'done'}\n"
+        "            calls = [ToolCall(f'c{i}', n, json.dumps(a)) for i, (n, a) in enumerate(reply.get('tool_calls', []))]\n"
+        "            if reply.get('content'):\n"
+        "                yield LLMChunk('content', reply['content'])\n"
+        "            if calls:\n"
+        "                yield LLMChunk('tool_calls', tool_calls=calls)\n"
         "        yield LLMChunk('usage', usage=Usage(100, 10, 110))\n"
         "        yield LLMChunk('done', finish_reason='tool_calls' if calls else 'stop')\n"
         "    def list_models(self):\n"
@@ -95,7 +148,7 @@ def server_process(tmp_path, monkeypatch):
     line = proc.stdout.readline().strip()
     assert line.startswith("WS_URL="), f"server failed to start: {line}\n{proc.stderr.read()}"
     url = line.split("=", 1)[1]
-    yield url, project, home
+    yield url, project, home, block_n
     proc.terminate()
     proc.wait(timeout=10)
 
@@ -108,25 +161,42 @@ class Client:
         self.ws = ws
         self.next_id = 0
         self.events: list[dict] = []
+        self._lock = asyncio.Lock()  # one RPC in flight at a time (responses are matched by id)
 
     async def call(self, method: str, **params) -> dict:
-        self.next_id += 1
-        await self.ws.send(json.dumps({"id": self.next_id, "method": method, "params": params}))
-        while True:
-            msg = json.loads(await self.ws.recv())
+        async with self._lock:
+            self.next_id += 1
+            await self.ws.send(json.dumps({"id": self.next_id, "method": method, "params": params}))
+            while True:
+                msg = json.loads(await self.ws.recv())
+                if "event" in msg:
+                    self.events.append(msg)
+                    continue
+                assert msg.get("id") == self.next_id, msg
+                if "error" in msg:
+                    raise AssertionError(f"{method} failed: {msg['error']}")
+                return msg["result"]
+
+    async def wait_output(self, needle: str, timeout: float = 15.0) -> str:
+        """Drain the socket until ``needle`` appears in the terminal_output events."""
+        deadline = time.time() + timeout
+        out = "".join(e["data"].get("text", "") for e in self.events if e["event"] == "terminal_output")
+        while needle not in out and time.time() < deadline:
+            try:
+                msg = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=0.5))
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
             if "event" in msg:
                 self.events.append(msg)
-                continue
-            assert msg.get("id") == self.next_id, msg
-            if "error" in msg:
-                raise AssertionError(f"{method} failed: {msg['error']}")
-            return msg["result"]
+                out = "".join(e["data"].get("text", "")
+                              for e in self.events if e["event"] == "terminal_output")
+        return out
 
-    async def wait_event(self, kind: str, timeout: float = 15.0) -> dict:
+    async def wait_event(self, kind: str, timeout: float = 15.0, match=None) -> dict:
         deadline = time.time() + timeout
         while time.time() < deadline:
             for i, ev in enumerate(self.events):
-                if ev["event"] == kind:
+                if ev["event"] == kind and (match is None or match(ev)):
                     return self.events.pop(i)
             # drain whatever is already queued
             try:
@@ -140,7 +210,7 @@ class Client:
 
 
 def test_full_turn_with_approval(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -170,7 +240,7 @@ def test_full_turn_with_approval(server_process):
 
 
 def test_reject_approval_with_feedback(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -187,8 +257,109 @@ def test_reject_approval_with_feedback(server_process):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("server_process", [3], indirect=True)
+def test_session_approve_all(server_process):
+    """'Allow all in this session': one answer enables auto-approval for the rest
+    of the session (deny rules still win); a new session resets it."""
+    url, project, home, _block_n = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+
+            # first write: approval is asked
+            await c.call("submit", prompt="write hello.txt")
+            ev = await c.wait_event("approval_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"],
+                         response={"allow": True, "session_approve": True})
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            assert (project / "hello.txt").read_text() == "hi"
+
+            # the GUI gets the session_approve event and open_project reports it
+            ev = await c.wait_event("session_approve")
+            assert ev["data"]["active"] is True
+            r = await c.call("open_project", root=str(project))
+            assert r["resumed"] is True and r["session_approve"] is True
+
+            # second write: auto-approved (session_approve, or the rule remembered in
+            # turn 1), so no approval is asked at all
+            c.events.clear()
+            await c.call("submit", prompt="write hello.txt again")
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            assert not [e for e in c.events if e["event"] == "approval_requested"], c.events
+
+            # a new session resets the session-wide auto-approve: the first write
+            # must be asked again (the fake provider gets a fresh script, so every
+            # write is asked - answer them all until the turn finishes)
+            await c.call("new_session")
+            c.events.clear()
+            await c.call("submit", prompt="write hello.txt third")
+            ev = await c.wait_event("approval_requested")
+            assert ev["data"]["kind"] == "write"
+            while True:
+                await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+                try:
+                    ev = await c.wait_event("approval_requested", timeout=3)
+                except AssertionError:
+                    break
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            r = await c.call("open_project", root=str(project))
+            assert r["session_approve"] is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", [(2, "1"), (2, "2")], indirect=True)
+def test_steer_while_running(server_process):
+    """'Send while running': a steer sent while the agent is working is injected
+    at the next safe point and the agent continues; the turn finishes normally.
+    Param "1": the agent is mid-stream; the steer aborts the stream.
+    Param "2": the agent is between model calls; the steer is queued and injected
+    at the top of the next step.
+
+    The fake provider parks the blocked stream on a gate (after yielding its
+    content chunk), so the test must steer only once the provider is known to be
+    mid-stream (a content_delta has arrived) - otherwise the steer would land
+    before the stream starts and the gate would be cleared after it was set."""
+    url, project, home, block_n = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="write hello.txt")
+            if block_n > 1:
+                # the agent is parked on the first approval: answer it, then steer
+                # while the second model call is running (blocked)
+                ev = await c.wait_event("approval_requested")
+                await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+            # the blocked stream yields a 'parked' content chunk before it parks on
+            # the gate: once it is seen the provider is mid-stream and safe to steer
+            ev = await c.wait_event("content_delta", match=lambda e: e["data"].get("text") == "parked")
+            r = await c.call("steer", prompt="also write bye.txt")
+            assert r["ok"]
+            ev = await c.wait_event("steer_injected")
+            assert ev["data"]["text"] == "also write bye.txt"
+            # the agent continues with the steer: it asks to write the (last) file
+            ev = await c.wait_event("approval_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"allow": True})
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+            # the steer was obeyed: the model wrote bye.txt
+            assert (project / "bye.txt").read_text() == "hi"
+            # steer with no running turn -> error
+            with pytest.raises(AssertionError):
+                await c.call("steer", prompt="late steer")
+
+    asyncio.run(scenario())
+
+
 def test_cancel_while_waiting_approval(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -205,7 +376,7 @@ def test_cancel_while_waiting_approval(server_process):
 
 
 def test_busy_guard_and_sessions(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -240,7 +411,7 @@ def test_turn_survives_disconnect(server_process):
     """Remote mode: the GUI drops the connection while a turn waits for an
     approval; the server must keep the turn alive, and re-ask the question
     when the GUI reconnects (open_project must not rebuild the engine)."""
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -271,7 +442,7 @@ def test_turn_survives_disconnect(server_process):
 
 
 def test_delete_sessions(server_process):
-    url, project, home = server_process
+    url, project, home, _block_n = server_process
 
     async def scenario():
         async with websockets.connect(url) as ws:
@@ -291,5 +462,46 @@ def test_delete_sessions(server_process):
             # deleting the current session starts a fresh one
             r = await c.call("delete_sessions", session_ids=[current])
             assert r["ok"] and r["new_session"] != current
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", ["ask"], indirect=True)
+def test_ask_user_round_trip(server_process):
+    """The model calls ask_user: the GUI gets ask_user_requested and the answer reaches the model."""
+    url, project, _home, _block = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="ask me something")
+            ev = await c.wait_event("ask_user_requested")
+            assert ev["data"]["question"] == "Done?"
+            assert [o["label"] for o in ev["data"]["options"]] == ["yes", "no"]
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"answer": "no", "custom": False})
+            res = await c.wait_event("tool_result", match=lambda e: e["data"].get("name") == "ask_user")
+            assert res["data"]["ok"] and "The user chose: no" in res["data"]["text"]
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", ["ask"], indirect=True)
+def test_ask_user_dismissed(server_process):
+    url, project, _home, _block = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="ask me something")
+            ev = await c.wait_event("ask_user_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"dismissed": True})
+            res = await c.wait_event("tool_result", match=lambda e: e["data"].get("name") == "ask_user")
+            assert "dismissed" in res["data"]["text"]
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done"
 
     asyncio.run(scenario())

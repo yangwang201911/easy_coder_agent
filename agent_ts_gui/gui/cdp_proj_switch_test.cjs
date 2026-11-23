@@ -44,7 +44,7 @@ function check(label, ok) {
       { name: "proj_a", mode: "local", path: ${JSON.stringify(ROOT_A)} },
       { name: "proj_b", mode: "local", path: ${JSON.stringify(ROOT_B)} }
     ]))`);
-  await evalJs("document.getElementById('root-label').click()");
+  await evalJs("document.getElementById('rail-project-menu').click()");
   await wait(300);
   const rows = await evalJs("[...document.querySelectorAll('#modal .projrow .pname')].map(e => e.textContent)");
   check("dialog lists both projects", rows.some((n) => n.includes("proj_a")) && rows.some((n) => n.includes("proj_b")));
@@ -67,7 +67,7 @@ function check(label, ok) {
   check("dialog closed after Open", !(await evalJs("!!document.querySelector('#modal-backdrop.show')")));
 
   // 3) double-clicking a row (from a fresh dialog) also opens it
-  await evalJs("document.getElementById('root-label').click()");
+  await evalJs("document.getElementById('rail-project-menu').click()");
   await wait(300);
   await evalJs(`[...document.querySelectorAll('#modal .projrow')].find(r => r.textContent.includes('proj_a')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   let back = false;

@@ -9,6 +9,9 @@ const path = require("path");
 
 const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..");
 const PORT = 8931;
+// the test server runs on this machine, so the server-side home dir name is
+// the local user name (the name prompt defaults to the home dir's base name)
+const HOME_NAME = os.homedir().split(/[\\/]/).pop();
 
 // point the app at the remote server, in an isolated user-data-dir (so the
 // developer's running instance is untouched)
@@ -54,7 +57,7 @@ function check(label, ok) {
     check("project opened via remote server", opened);
 
     // 3) connection tab shows remote mode
-    await evalJs("document.getElementById('settings-btn').click()");
+    await evalJs("document.getElementById('rail-settings').click()");
     await wait(300);
     await evalJs("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()");
     await wait(500);
@@ -73,7 +76,7 @@ function check(label, ok) {
     // name prompt.
     const ls = await evalJs(`(async () => {
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-      document.getElementById('root-label').click();
+      document.getElementById('rail-project-menu').click();
       await sleep(300);
       document.querySelector('#modal .add-project').click();
       await sleep(400);
@@ -85,7 +88,7 @@ function check(label, ok) {
       await sleep(1500);
       const errShown = (document.querySelector('.modal-backdrop.stacked .msg') || {}).textContent || '';
       // good path with an ssh-style prefix: host part is stripped
-      input.value = 'xiping@xiping-home-nv:~';
+      input.value = ${JSON.stringify(HOME_NAME + "@test-host:~")};
       document.querySelector('.modal-backdrop.stacked .yes').click();
       await sleep(1500);
       // the name prompt (stacked on top of the add-project modal) must be up
@@ -102,7 +105,7 @@ function check(label, ok) {
     const r4 = JSON.parse(ls);
     check("remote add-project shows a path text input with example placeholder", r4.inputUp);
     check("bad path rejected via list_dir over the remote connection", /not a directory/i.test(r4.errShown));
-    check("valid ssh-style path (user@host:~) proceeds to the name prompt", r4.promptUp && r4.promptVal === "xiping");
+    check("valid ssh-style path (user@host:~) proceeds to the name prompt", r4.promptUp && r4.promptVal === HOME_NAME);
 
     // 5) auto-reconnect: kill the remote server, the GUI must show the banner
     // and keep trying; restart the server and the GUI must reconnect on its own
@@ -136,17 +139,17 @@ function check(label, ok) {
       await wait(1500);
       let banner = false;
       for (let i = 0; i < 30; i++) {
-        banner = await evalJs("!!document.getElementById('backend-banner')");
+        banner = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (banner) break;
         await wait(500);
       }
-      check("banner shown when the remote server dies", banner);
+      check("backend-down chip shown when the remote server dies", banner);
       check("auto-reconnect is retrying", appLog().includes("remote ws closed, retry"));
       // restart the server: the GUI must reconnect without any user action
       startSrv();
       let restored = false;
       for (let i = 0; i < 60; i++) {
-        const b = await evalJs("!!document.getElementById('backend-banner')");
+        const b = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (!b) { restored = true; break; }
         await wait(500);
       }

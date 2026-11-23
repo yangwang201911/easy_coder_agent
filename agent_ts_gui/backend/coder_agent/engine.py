@@ -16,6 +16,7 @@ from .orchestrator import Orchestrator, Plan, PlanError, PlanResult, Planner, St
 from .prompts import PromptBuilder, PromptSections, TaskTypeRegistry
 from .session import Session, Turn
 from .tools import ToolContext, ToolRegistry, default_registry
+from .tools.mcp_client import McpHub, load_servers
 
 
 def _serialised(approver: Optional[Approver]) -> Optional[Approver]:
@@ -52,10 +53,23 @@ class Engine:
         self.sections = PromptSections()
         self.ctx_mgr = ContextManager(config.context)
         self.registry: ToolRegistry = default_registry()
+        self.mcp = McpHub(load_servers(self.root, self.policy.data))
+        self.mcp_tool_names: list[str] = []
+        for t in self.mcp.start():
+            self.registry.register(t)
+            self.mcp_tool_names.append(t.name)
+        self.asker: Optional[Callable[[dict], Optional[dict]]] = None  # set by the server: asks the user a question
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
+        # Steer: the user sends a new message while a turn is running. The agent
+        # loop picks it up at the next safe point (top of step) and continues.
+        self._steer_event = threading.Event()
+        self._steer_prompt: str = ""
 
     # ------------------------------------------------------------- settings
+    def close(self) -> None:
+        self.mcp.close()
+
     def apply_config(self, config: AppConfig) -> None:
         """Call between runs after the user edited settings."""
         self.config = config
@@ -68,20 +82,47 @@ class Engine:
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def steer(self, prompt: str) -> None:
+        """Queue a user message for the running turn (the GUI's "send while running").
+
+        The agent loop injects it at the next safe point: immediately if the
+        model is not streaming (a tool is running / it is between steps), or as
+        soon as the current stream is aborted (a command is running: the model
+        is not mid-stream, the steer is picked up at the top of the next step).
+        Raises RuntimeError if no turn is running."""
+        if not self._lock.locked():
+            raise RuntimeError("no turn is running")
+        self._steer_prompt = prompt
+        self._steer_event.set()
+
     # ----------------------------------------------------------------- run
-    def submit(self, prompt: str, task_type: Optional[str] = None) -> AgentResult:
-        """Run one user turn to completion (blocking - call from a worker thread)."""
+    def submit(
+        self,
+        prompt: str,
+        task_type: Optional[str] = None,
+        images: Optional[list[dict]] = None,
+    ) -> AgentResult:
+        """Run one user turn to completion (blocking - call from a worker thread).
+
+        ``images``: [{"name": str, "data_url": "data:image/..."}] sent to the model
+        as image_url parts of the user message (needs a vision-capable model)."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
+        turn: Optional[Turn] = None
         try:
             self.cancel_event.clear()
+            self._steer_event.clear()
+            self._steer_prompt = ""
             tt = self.task_types.get(task_type or self.task_types.detect(prompt))
-            turn = self.session.new_turn(prompt, tt.name)
+            turn = self.session.new_turn(prompt, tt.name, images)
             self.session.save()
-            self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt)
+            self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt, images=turn.images)
 
             provider = self._provider_override or create_provider(self.config)
-            registry = self.registry.subset(tt.tools) if tt.tools else self.registry
+            registry = self.registry.subset([*tt.tools, *self.mcp_tool_names]) if tt.tools else self.registry
+            # carry the checklist over from the previous turn so it survives across turns
+            prev = self.session.path()
+            prev_todos = prev[-2].todos if len(prev) >= 2 else []
             tool_ctx = ToolContext(
                 root=self.root,
                 cancel=self.cancel_event,
@@ -89,10 +130,13 @@ class Engine:
                 snapshots=self.session.snapshots,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
+                ask_user=self.asker,
+                todos=list(prev_todos),
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,
                 self.ctx_mgr, self.bus, self.config.agent, self.config.thinking, self.cancel_event,
+                steer=self._steer_event, steer_prompt=lambda: self._steer_prompt,
             )
             system = PromptBuilder(self.root, self.task_types, self.sections).build(tt)
             messages = [{"role": "system", "content": system}, *self.session.build_messages()]
@@ -108,12 +152,26 @@ class Engine:
             # The user message is already in turn.messages and in `messages`.
             result = agent.run(messages, on_append=on_append, on_compact=on_compact)
             turn.ran_commands = agent.ran_commands
+            turn.todos = list(tool_ctx.todos)
             self.session.finish_turn(turn, result.status, result.final_text)
             self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error)
             self.bus.emit("status", state="idle", detail="")
+            if self.config.agent.memory_extraction and result.status == "done":
+                # background: extraction must not hold the turn lock
+                threading.Thread(
+                    target=self._extract_memory, args=(provider, prompt, result.final_text),
+                    daemon=True, name="memory-extract",
+                ).start()
             return result
         finally:
             self._lock.release()
+
+    def _extract_memory(self, provider: LLMProvider, prompt: str, final_text: str) -> None:
+        """Best-effort: persist durable facts from this turn (never breaks the turn)."""
+        from .knowledge import extract_memory
+        saved = extract_memory(provider, self.root, prompt, final_text)
+        if saved:
+            self.bus.emit("memory_saved", notes=saved)
 
     # ------------------------------------------------------ plan (subtasks)
     def submit_plan(

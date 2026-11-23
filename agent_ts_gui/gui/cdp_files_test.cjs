@@ -1,4 +1,4 @@
-// Smoke test for the Files tree + Diff view (left "Files" tab, mid Chat/Diff tabs).
+// Smoke test for the Files tree + tabbed file viewer (left "Files" tab, mid file tabs).
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 const fs = require("fs");
 const os = require("os");
@@ -51,10 +51,10 @@ const check = (name, ok, extra = "") => {
   check("project opened, tree has rows", opened);
 
   // 1) Files tab exists in the left tabs
-  check("left Files tab exists", !!(await evalJs(`!!document.querySelector('#left-tabs .tab[data-tab="files"]')`)));
+  check("left Files tab exists", !!(await evalJs(`!!document.querySelector('#left-rail .tab[data-tab="files"]')`)));
 
   // 1b) open the seeded session (the boot session is fresh, the seeded one holds the turn)
-  await evalJs(`document.querySelector('#left-tabs .tab[data-tab="sessions"]').click()`);
+  await evalJs(`document.querySelector('#left-rail .tab[data-tab="sessions"]').click()`);
   let seeded = false;
   for (let i = 0; i < 40; i++) {
     seeded = !!(await evalJs(`(() => {
@@ -70,7 +70,7 @@ const check = (name, ok, extra = "") => {
   await wait(800);
 
   // 2) switch to the Files tab and verify the tree shows src/
-  await evalJs(`document.querySelector('#left-tabs .tab[data-tab="files"]').click()`);
+  await evalJs(`document.querySelector('#left-rail .tab[data-tab="files"]').click()`);
   await wait(300);
   const treeNames = await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).map(e => e.textContent)`);
   check("tree shows src dir", (treeNames ?? []).some((n) => n.includes("src")), JSON.stringify(treeNames));
@@ -111,47 +111,76 @@ const check = (name, ok, extra = "") => {
   }
   check("collapsing/expanding src keeps working", fileRow);
 
-  // 4) click the unchanged file -> mid switches to Diff tab, plain content shown
+  // 4) click the unchanged file -> a tab opens and the mid pane shows its content
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('hello.txt')).click()`);
-  let diffShown = false;
+  let bodyText = "";
   for (let i = 0; i < 20; i++) {
-    diffShown = !!(await evalJs(`!document.getElementById('diff-view').classList.contains('hidden')`));
-    if (diffShown) break;
+    bodyText = await evalJs(`document.getElementById('file-body').textContent`) ?? "";
+    if (!bodyText.includes("loading...") && bodyText.includes("line2")) break;
     await wait(300);
   }
-  check("mid switched to Diff view", diffShown);
-  let diffText = "";
-  for (let i = 0; i < 20; i++) {
-    diffText = await evalJs(`document.getElementById('diff-body').textContent`) ?? "";
-    if (!diffText.includes("loading...") && diffText.includes("line2")) break;
-    await wait(300);
-  }
-  check("diff shows file content", diffText.includes("line2"), diffText.slice(0, 80));
-  check("diff turn select lists the seeded turn", !!(await evalJs(`document.getElementById('diff-turn-select').textContent.includes('seed turn')`)));
+  check("mid shows file content", bodyText.includes("line2"), bodyText.slice(0, 80));
+  check("tab bar has one tab", (await evalJs(`document.querySelectorAll('#file-tabs .ftab').length`)) === 1);
+  check("tab is active and named", !!(await evalJs(`(() => {
+      const t = document.querySelector('#file-tabs .ftab');
+      return t && t.classList.contains('active') && t.querySelector('.fname').textContent === 'hello.txt';
+    })()`)));
 
-  // 4b) click the changed file -> real diff with deleted + added lines
+  // 4b) click the changed file -> second tab, both tabs present, content switched
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('mod.txt')).click()`);
-  let diffOk = false;
+  let modOk = false;
   for (let i = 0; i < 20; i++) {
-    diffOk = !!(await evalJs(`(() => {
-      const body = document.getElementById('diff-body');
-      return body.querySelector('.dline.del') && body.querySelector('.dline.add')
-        && body.querySelector('.dline.del .dtext').textContent === 'old line'
-        && body.querySelector('.dline.add .dtext').textContent === 'changed line';
+    modOk = !!(await evalJs(`(() => {
+      const body = document.getElementById('file-body');
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      return body.textContent.includes('changed line') && tabs.length === 2
+        && tabs[1].classList.contains('active');
     })()`));
-    if (diffOk) break;
+    if (modOk) break;
     await wait(300);
   }
-  check("changed file shows del/add diff lines", diffOk);
-  if (!diffOk) console.log("backend:", backendLog().slice(-1500));
+  check("second tab opens with its content", modOk);
+  check("changed tab shows modified dot", !!(await evalJs(`(() => {
+      const t = Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'mod.txt');
+      return t && t.querySelector('.fdot');
+    })()`)));
+  check("unchanged tab has no dot", !!(await evalJs(`(() => {
+      const t = Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt');
+      return t && !t.querySelector('.fdot');
+    })()`)));
 
-  // 5) Chat tab still works: switch back and forth
-  await evalJs(`document.querySelector('#mid-tabs .tab[data-midtab="chat"]').click()`);
+  // 5) click the first tab -> switches back to hello.txt content
+  await evalJs(`Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt').click()`);
   await wait(200);
-  check("back to chat works", !!(await evalJs(`!document.getElementById('chat').classList.contains('hidden') && document.getElementById('diff-view').classList.contains('hidden')`)));
-  await evalJs(`document.querySelector('#mid-tabs .tab[data-midtab="diff"]').click()`);
+  let switched = false;
+  for (let i = 0; i < 20; i++) {
+    switched = !!(await evalJs(`(() => {
+      const body = document.getElementById('file-body');
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      return body.textContent.includes('line2') && !body.textContent.includes('changed line')
+        && tabs[0].classList.contains('active') && !tabs[1].classList.contains('active');
+    })()`));
+    if (switched) break;
+    await wait(300);
+  }
+  check("clicking a tab switches the view", switched);
+
+  // 5b) close the active tab -> the other tab becomes active
+  await evalJs(`Array.from(document.querySelectorAll('#file-tabs .ftab')).find(e => e.querySelector('.fname').textContent === 'hello.txt').querySelector('.fclose').click()`);
   await wait(200);
-  check("back to diff works", !!(await evalJs(`!document.getElementById('diff-view').classList.contains('hidden')`)));
+  let closed = false;
+  for (let i = 0; i < 20; i++) {
+    closed = !!(await evalJs(`(() => {
+      const tabs = document.querySelectorAll('#file-tabs .ftab');
+      const body = document.getElementById('file-body');
+      return tabs.length === 1 && tabs[0].classList.contains('active')
+        && tabs[0].querySelector('.fname').textContent === 'mod.txt'
+        && body.textContent.includes('changed line');
+    })()`));
+    if (closed) break;
+    await wait(300);
+  }
+  check("close button removes the tab and switches to the remaining one", closed);
 
   // 6) tree refresh button does not break
   await evalJs(`document.getElementById('tree-refresh-btn').click()`);

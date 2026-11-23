@@ -34,7 +34,7 @@ function check(name, cond) {
   check("project opened", (await evalJs("document.getElementById('titlebar-name').textContent")).includes("Coder Agent:"));
 
   // 1) open settings, go to the debug tab
-  await evalJs("document.getElementById('settings-btn').click()");
+  await evalJs("document.getElementById('rail-settings').click()");
   await wait(500);
   check("settings modal shown", await evalJs("!!document.querySelector('.settings')"));
   check("debug tab exists", await evalJs("!!document.querySelector('.settings .tabs button[data-p=\"debug\"]')"));
@@ -51,7 +51,7 @@ function check(name, cond) {
   await evalJs("(()=>{const c=document.querySelector('[data-s=\"debug\"][data-k=\"prompt_dump\"]'); c.checked=true;})()");
   await evalJs("document.querySelector('#modal .foot .yes').click()");
   await wait(600);
-  await evalJs("document.getElementById('settings-btn').click()");
+  await evalJs("document.getElementById('rail-settings').click()");
   await wait(500);
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"debug\"]').click()");
   await wait(300);
@@ -60,7 +60,7 @@ function check(name, cond) {
   await wait(200);
 
   // 3) View dumps dialog: empty state
-  await evalJs("document.getElementById('settings-btn').click()");
+  await evalJs("document.getElementById('rail-settings').click()");
   await wait(500);
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"debug\"]').click()");
   await wait(300);

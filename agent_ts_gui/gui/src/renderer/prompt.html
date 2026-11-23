@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Prompt</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f3f3f3; --fg: #222; --muted: #666; --border: #c8c8c8; --field: #fff; --accent: #0e639c; --err: #d9534f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #252526; --fg: #ddd; --muted: #999; --border: #3c3c3c; --field: #1e1e1e; } }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px "Segoe UI", system-ui, sans-serif; }
+  #root { padding: 16px 18px 14px; }
+  h1 { font-size: 15px; margin: 0 0 6px; }
+  .msg { color: var(--muted); margin: 0 0 10px; white-space: pre-wrap; }
+  .err { color: var(--err); margin: 0 0 10px; white-space: pre-wrap; }
+  label { display: block; margin: 8px 0 3px; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+  input:focus { outline: none; border-color: var(--accent); }
+  input.bad { border-color: var(--err); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  button { padding: 5px 16px; border-radius: 4px; border: 1px solid var(--border); background: var(--field); color: var(--fg); font: inherit; cursor: pointer; }
+  button.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(async () => {
+  const spec = await window.promptApi.getSpec();
+  if (!spec) return;
+  document.title = spec.title;
+  const root = document.getElementById("root");
+  const add = (parent, tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; parent.appendChild(e); return e; };
+  add(root, "h1", "", spec.title);
+  if (spec.error) add(root, "div", "err", spec.error);
+  if (spec.message) add(root, "div", "msg", spec.message);
+  const inputs = {};
+  const adv = spec.fields.filter((f) => f.advanced);
+  const advBox = adv.length ? add(root, "details") : null;
+  if (advBox) add(advBox, "summary", "", "Advanced");
+  for (const f of spec.fields) {
+    const host = f.advanced ? advBox : root;
+    add(host, "label", "", f.label + (f.optional ? " (optional)" : ""));
+    const input = add(host, "input");
+    input.type = f.type === "password" ? "password" : "text";
+    input.value = f.value || "";
+    input.placeholder = f.placeholder || "";
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    inputs[f.id] = input;
+  }
+  // visible fields first in the DOM order: move the details block to the end
+  if (advBox) root.appendChild(advBox);
+  const btns = add(root, "div", "btns");
+  const cancel = add(btns, "button", "", "Cancel");
+  const ok = add(btns, "button", "ok", spec.okLabel || "OK");
+  const submit = () => {
+    let bad = false;
+    const values = {};
+    for (const f of spec.fields) {
+      const v = inputs[f.id].value.trim();
+      values[f.id] = f.type === "password" ? inputs[f.id].value : v;
+      const miss = !f.optional && !v;
+      inputs[f.id].classList.toggle("bad", miss);
+      if (miss) { bad = true; if (f.advanced) advBox.open = true; }
+    }
+    if (bad) { const first = spec.fields.find((f) => !f.optional && !inputs[f.id].value.trim()); inputs[first.id].focus(); return; }
+    window.promptApi.submit(values);
+  };
+  ok.addEventListener("click", submit);
+  cancel.addEventListener("click", () => window.promptApi.cancel());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+    else if (e.key === "Escape") { e.preventDefault(); window.promptApi.cancel(); }
+  });
+  const firstVisible = spec.fields.find((f) => !f.advanced);
+  if (firstVisible) { inputs[firstVisible.id].focus(); inputs[firstVisible.id].select(); }
+  window.promptApi.resize(document.documentElement.scrollHeight);
+  if (advBox) advBox.addEventListener("toggle", () => window.promptApi.resize(document.documentElement.scrollHeight));
+})();
+</script>
+</body>
+</html>
