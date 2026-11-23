@@ -277,6 +277,7 @@ def fs_tools() -> list[Tool]:
                 "required": ["path"],
             },
             read_file,
+            cacheable=True,
         ),
         Tool(
             "list_dir",

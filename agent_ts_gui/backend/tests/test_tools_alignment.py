@@ -315,6 +315,56 @@ def test_environment_block_in_system_prompt(tmp_path):
     assert "# Environment" not in out
 
 
+def test_read_file_turn_cache(tmp_path):
+    from coder_agent.tools import fs
+    from coder_agent.tools.base import ToolContext, ToolRegistry
+
+    (tmp_path / "a.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    ctx = ToolContext(root=tmp_path)
+    reg = ToolRegistry()
+    reg.register(fs.fs_tools()[0])  # read_file
+    ok, out1 = reg.execute("read_file", {"path": "a.txt"}, ctx)
+    assert ok and "line2" in out1.text
+    # same file, unchanged: stub instead of the content again
+    ok, out2 = reg.execute("read_file", {"path": "a.txt"}, ctx)
+    assert ok and "unchanged" in out2.text and "line2" not in out2.text
+    # a different range is a different call: full content
+    ok, out3 = reg.execute("read_file", {"path": "a.txt", "start_line": 2}, ctx)
+    assert ok and "line2" in out3.text
+    # file changed: full content again
+    (tmp_path / "a.txt").write_text("changed\n", encoding="utf-8")
+    ok, out4 = reg.execute("read_file", {"path": "a.txt"}, ctx)
+    assert ok and "changed" in out4.text
+    # a new turn (fresh ctx) has a fresh cache
+    ctx2 = ToolContext(root=tmp_path)
+    ok, out5 = reg.execute("read_file", {"path": "a.txt"}, ctx2)
+    assert ok and "changed" in out5.text and "unchanged" not in out5.text
+
+
+def test_waves_parallel_safe():
+    from coder_agent.orchestrator.models import SubTask
+    from coder_agent.orchestrator.orchestrator import _waves
+
+    # no file hints: all parallel-safe subtasks share one wave
+    w = _waves([SubTask("a", "a", "ga"), SubTask("b", "b", "gb")])
+    assert len(w) == 1 and len(w[0]) == 2
+    # same file hint: forced into separate waves
+    w = _waves([SubTask("a", "a", "ga", files=["src/x.cpp"]),
+                SubTask("b", "b", "gb", files=["src/x.cpp"]),
+                SubTask("c", "c", "gc", files=["src/y.cpp"])])
+    assert [len(x) for x in w] == [2, 1]  # a+c together (no clash), b alone (clashes on x.cpp)
+    # parallel_safe=False: b gets its own locked wave; a and c (no clash) share the first
+    w = _waves([SubTask("a", "a", "ga"), SubTask("b", "b", "gb", parallel_safe=False),
+                SubTask("c", "c", "gc")])
+    assert [len(x) for x in w] == [2, 1]
+    assert w[1][0].id == "b"  # the unsafe one is alone
+    # two unsafe subtasks: each alone
+    w = _waves([SubTask("a", "a", "ga", parallel_safe=False), SubTask("b", "b", "gb", parallel_safe=False)])
+    assert [len(x) for x in w] == [1, 1]
+    # default is parallel-safe
+    assert SubTask("a", "a", "ga").parallel_safe is True
+
+
 def test_vision_fallback_drops_images_for_text_only_model(monkeypatch):
     class Provider:
         server = ServerConfig(base_url="http://127.0.0.1:1/v1", model="m")

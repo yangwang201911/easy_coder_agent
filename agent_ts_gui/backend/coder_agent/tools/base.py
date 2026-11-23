@@ -32,6 +32,7 @@ class ToolContext:
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
     ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
     todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
+    turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -83,6 +84,7 @@ class Tool:
     preview: Optional[Callable[[ToolContext, dict], str]] = None  # diff / detail for approval
     command_of: Optional[Callable[[dict], str]] = None  # exec tools: the command line the approval policy judges
     target_of: Optional[Callable[[dict], str]] = None  # network tools: the host the approval policy judges
+    cacheable: bool = False  # True: repeat calls with an unchanged target file return a stub (saves tokens)
 
     def schema(self) -> dict:
         return {
@@ -145,10 +147,29 @@ class ToolRegistry:
             return False, ToolOutput(f"ERROR: unknown tool '{name}'. Available: {', '.join(self._tools)}")
         try:
             clean = self.normalize_args(tool, args)
+            key = None
+            if tool.cacheable:
+                # (tool, args, mtime of the target file): a repeat read of an
+                # unchanged file returns a stub instead of the whole content again
+                try:
+                    p = ctx.resolve_readable(str(clean.get("path", "")))
+                except ToolError:
+                    p = None
+                mtime = p.stat().st_mtime_ns if p is not None and p.is_file() else 0
+                key = (name, json.dumps(clean, sort_keys=True, ensure_ascii=False), mtime)
+                prev = ctx.turn_cache.get(key)
+                if prev is not None:
+                    return True, ToolOutput(
+                        f"[unchanged since your earlier {name} call in this turn: "
+                        f"{prev.text.splitlines()[0] if prev.text else name} - the content is already in "
+                        "your context; do not re-read it]"
+                    )
             out = tool.func(ctx, clean)
             if isinstance(out, str):
                 out = ToolOutput(out)
             out.text = truncate_middle(out.text, ctx.max_output_chars)
+            if key is not None:
+                ctx.turn_cache[key] = out
             return True, out
         except ToolError as e:
             return False, ToolOutput(f"ERROR: {e}")
