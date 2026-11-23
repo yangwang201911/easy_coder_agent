@@ -37,12 +37,24 @@ echo node_modules is missing or stale, running npm install...
 call npm install
 if errorlevel 1 exit /b 1
 :deps_ok
-rem electron binary must be in place (its postinstall downloads from GitHub,
-rem which often fails on restricted networks - see README "China / restricted network")
+rem electron binary: its postinstall downloads from GitHub, which fails on
+rem restricted networks. If it is missing, fetch it from npmmirror ourselves
+rem (curl.exe and tar ship with Windows 10+).
 if exist "node_modules\electron\dist\electron.exe" goto :electron_ok
-echo ERROR: node_modules\electron\dist\electron.exe is missing.
-echo Download the electron zip manually (see README "China / restricted network")
-echo and extract it into node_modules\electron\dist, then re-run release.bat.
+echo electron binary missing, downloading from npmmirror...
+for /f "delims=" %%v in ('node -p "require('./node_modules/electron/package.json').version"') do set ELEC_VER=%%v
+curl.exe -L --retry 5 -o "%TEMP%\electron.zip" "https://cdn.npmmirror.com/binaries/electron/v%ELEC_VER%/electron-v%ELEC_VER%-win32-x64.zip"
+if errorlevel 1 goto :elec_fail
+if not exist "node_modules\electron\dist" mkdir "node_modules\electron\dist"
+tar -xf "%TEMP%\electron.zip" -C "node_modules\electron\dist"
+if errorlevel 1 goto :elec_fail
+if exist "node_modules\electron\dist\electron.d.ts" move /Y "node_modules\electron\dist\electron.d.ts" "node_modules\electron\electron.d.ts" >nul
+<nul set /p=electron.exe> "node_modules\electron\path.txt"
+if not exist "node_modules\electron\dist\electron.exe" goto :elec_fail
+goto :electron_ok
+:elec_fail
+echo ERROR: electron download/extraction failed.
+echo Download it manually (see README "China / restricted network") and re-run release.bat.
 exit /b 1
 :electron_ok
 call npm run dist:win
