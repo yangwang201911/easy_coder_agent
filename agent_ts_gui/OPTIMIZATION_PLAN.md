@@ -12,7 +12,7 @@
 | 3 | LLM 调用重试 + 指数退避 | 高 | ✅ | `llm/openai_compat.py` |
 | 4 | grep_search 换 ripgrep + 上下文行 | 高 | ✅ | `tools/fs.py` |
 | 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ✅ | `context/compression.py` |
-| 6 | 浏览器多 tab | 中 | ⬜ | `tools/browser.py` |
+| 6 | 浏览器多 tab | 中 | ✅ | `tools/browser.py` |
 | 7 | 记忆自动沉淀（turn-end 提取） | 中 | ⬜ | `knowledge.py` |
 | 8 | 系统提示注入动态环境信息 | 中 | ⬜ | `prompts/builder.py` |
 | 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ⬜ | `tools/web.py` |
@@ -61,9 +61,12 @@
   保留最近 1 张），接入 `SummarizeStrategy` 全部三个 step。
 - **验证**：`test_strip_old_images`；backend 23 passed。
 
-### 6. 浏览器多 tab ⬜
+### 6. 浏览器多 tab ✅
 - **问题**：全局单 `_page`，无法同时看两个页面。
-- **方案**：`browser_new_tab` / `browser_switch_tab`，Playwright context 原生支持多 page。
+- **实现**：`_pages` 列表 + `_tab` 活动索引（`_page` 变为 property）；
+  新增 `browser_new_tab`（开新 tab 并切换，走 network 审批）和
+  `browser_switch_tab`（1-based 切回旧 tab，返回快照）；`browser_close` 关全部。
+- **验证**：`test_browser_flow` 扩展了 new_tab/switch_tab/越界 断言（本机有 chromium，真实跑通）。
 
 ### 7. 记忆自动沉淀 ⬜
 - **问题**：memory 只在启动时读入 prompt，依赖模型自觉调用 `remember`。
@@ -103,4 +106,6 @@
 - 2026-11-23：#4（grep 换 ripgrep + context_lines）完成。
   验证：backend 22 passed。已提交 b0b0c59。
 - 2026-11-23：#5（压缩时清理旧图片，保留最近 1 张）完成。
-  验证：backend 23 passed。
+  验证：backend 23 passed。已提交 185e871。
+- 2026-11-23：#6（浏览器多 tab：browser_new_tab / browser_switch_tab）完成。
+  验证：backend 23 passed（浏览器 E2E 真实跑通）。

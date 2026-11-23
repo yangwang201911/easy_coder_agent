@@ -75,9 +75,14 @@ class _Browser:
         self._pw = None
         self._browser = None
         self._context = None
-        self._page = None
+        self._pages: list = []
+        self._tab = 0  # index of the active tab in _pages
         self._console: list[str] = []
         self.approved_hosts: set[str] = set()
+
+    @property
+    def _page(self):
+        return self._pages[self._tab] if self._pages else None
 
     def call(self, fn: Callable[[], object]):
         with self._start_lock:
@@ -105,18 +110,26 @@ class _Browser:
     def ensure_started(self):
         if self._page is not None and not self._page.is_closed():
             return self._page
+        self._new_tab()
+        return self._page
+
+    def _new_tab(self, url: Optional[str] = None):
         from playwright.sync_api import sync_playwright
 
         if self._pw is None:
             self._pw = sync_playwright().start()
         if self._browser is None or not self._browser.is_connected():
             self._browser = self._launch()
-        self._context = self._browser.new_context(viewport=VIEWPORT)
-        self._context.route("**/*", self._route)
-        self._page = self._context.new_page()
-        self._page.on("console", lambda m: self._log(f"console.{m.type}: {m.text}"))
-        self._page.on("pageerror", lambda e: self._log(f"pageerror: {e}"))
-        return self._page
+            self._context = self._browser.new_context(viewport=VIEWPORT)
+            self._context.route("**/*", self._route)
+        page = self._context.new_page()
+        page.on("console", lambda m: self._log(f"console.{m.type}: {m.text}"))
+        page.on("pageerror", lambda e: self._log(f"pageerror: {e}"))
+        self._pages.append(page)
+        self._tab = len(self._pages) - 1
+        if url:
+            page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+        return page
 
     def _launch(self):
         # executable None = Playwright's bundled Chromium; system Chrome is the fallback
@@ -151,7 +164,9 @@ class _Browser:
                 self._pw.stop()
         except Exception:  # noqa: BLE001
             pass
-        self._pw = self._browser = self._context = self._page = None
+        self._pw = self._browser = self._context = None
+        self._pages.clear()
+        self._tab = 0
         self._console.clear()
         self.approved_hosts.clear()
 
@@ -308,6 +323,41 @@ def browser_close(ctx: ToolContext, a: dict) -> str:
     return "browser closed"
 
 
+def browser_new_tab(ctx: ToolContext, a: dict) -> str:
+    url = _http_url(a["url"])
+    host = urllib.parse.urlparse(url).hostname or ""
+
+    def run():
+        _BROWSER.approved_hosts.add(host)
+        page = _BROWSER._new_tab()
+        try:
+            resp = page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(f"navigation failed: {str(e).splitlines()[0]}")
+        status = resp.status if resp else "n/a"
+        n = len(_BROWSER._pages)
+        return f"opened tab {n} (HTTP {status}), now active\n\n" + _snapshot_text(page)
+
+    return _BROWSER.call(run)
+
+
+def browser_switch_tab(ctx: ToolContext, a: dict) -> str:
+    index = int(a.get("index", 0))
+
+    def run():
+        pages = [p for p in _BROWSER._pages if not p.is_closed()]
+        if not pages:
+            raise ToolError("no tabs open; call browser_navigate first")
+        if not 1 <= index <= len(pages):
+            raise ToolError(f"tab index must be 1-{len(pages)}")
+        _BROWSER._pages = pages
+        _BROWSER._tab = index - 1
+        page = pages[index - 1]
+        return f"switched to tab {index} ({len(pages)} open)\n\n" + _snapshot_text(page)
+
+    return _BROWSER.call(run)
+
+
 def web_open(ctx: ToolContext, a: dict) -> str:
     url = _http_url(a["url"])
     if not is_local_host(urllib.parse.urlparse(url).hostname or ""):
@@ -382,8 +432,30 @@ def browser_tools() -> list[Tool]:
             kind="read",
         ),
         Tool(
+            name="browser_new_tab",
+            description=(
+                "Open a URL in a NEW tab and switch to it (the previous tab stays open). "
+                "Use it to keep a second page alongside the current one."
+            ),
+            parameters=url_param,
+            func=browser_new_tab,
+            kind="network",
+            target_of=_url_host,
+        ),
+        Tool(
+            name="browser_switch_tab",
+            description="Switch back to an earlier tab (1-based index) and return its snapshot.",
+            parameters={
+                "type": "object",
+                "properties": {"index": {"type": "integer", "description": "tab number, 1-based"}},
+                "required": ["index"],
+            },
+            func=browser_switch_tab,
+            kind="read",
+        ),
+        Tool(
             name="browser_close",
-            description="Close the browser.",
+            description="Close the browser (all tabs).",
             parameters={"type": "object", "properties": {}},
             func=browser_close,
             kind="read",

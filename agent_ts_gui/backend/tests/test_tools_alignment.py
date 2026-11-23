@@ -38,6 +38,8 @@ class _Site(BaseHTTPRequestHandler):
                            b"<body><script>evil()</script><p>World &amp; more</p></body></html>"), "text/html"
         elif self.path == "/demo":
             body, ctype = PAGE, "text/html"
+        elif self.path == "/other":
+            body, ctype = (b"<html><head><title>Other</title></head><body><h1>Other page</h1></body></html>"), "text/html"
         else:
             self.send_response(404)
             self.end_headers()
@@ -234,6 +236,13 @@ def test_browser_flow(site, ctx):
     assert shot.images[0]["data_url"].startswith("data:image/jpeg;base64,")
     with pytest.raises(ToolError, match="ref must look like"):
         browser.browser_click(ctx, {"ref": "button"})
+    # multi-tab: open a second page, switch back, close everything
+    tab2 = browser.browser_new_tab(ctx, {"url": site + "/other"})
+    assert "opened tab 2" in tab2 and "Other page" in tab2
+    back = browser.browser_switch_tab(ctx, {"index": 1})
+    assert "switched to tab 1 (2 open)" in back and "Hello page" in back
+    with pytest.raises(ToolError, match="tab index must be"):
+        browser.browser_switch_tab(ctx, {"index": 9})
     browser.browser_close(ctx, {})
 
 
