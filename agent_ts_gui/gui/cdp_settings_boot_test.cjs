@@ -26,7 +26,7 @@ let cdp;
   assert.ok(ready, `Settings defaults did not load\n${app.getLog()}`);
   assert.ok(app.getLog().includes("[main] ws connected"), app.getLog());
   assert.ok(!app.getLog().includes("backend not connected"), app.getLog());
-  assert.equal(await cdp.evalJs("!!document.getElementById('backend-banner')"), false);
+  assert.equal(await cdp.evalJs("document.getElementById('backend-status').classList.contains('hidden')"), true);
   console.log("PASS: local backend connected and Settings defaults loaded during boot");
 })().catch(e => {
   console.error(e);

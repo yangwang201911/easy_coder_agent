@@ -370,11 +370,7 @@ function savedProjectFor(root: string): SavedProject | null {
 async function openProject(root: string, sessionId: string | null = null) {
   const r = await call("open_project", { root, session_id: sessionId });
   if (r && r.__error) { chat.line(`\n[error] open project: ${r.__error}`, "c-error"); return; }
-  if (backendDown) {
-    backendDown = false;
-    const banner = document.getElementById("backend-banner");
-    if (banner) banner.remove();
-  }
+  clearBackendDown();
   S.root = r.root;
   S.taskTypes = r.task_types;
   S.effort = r.effort;
@@ -3468,40 +3464,75 @@ function initInputResize() {
 initInputResize();
 
 // ------------------------------------------------------------------- boot
+// The backend-down state is a NON-BLOCKING chip at the left end of the status
+// bar (it used to be a full-width banner over the toolbar, which hid the
+// Settings button and made the app unusable when the connection was misconfigured).
 let backendDown = false;
 
-function showBackendBanner(code: number | null) {
+async function backendDownDetail(): Promise<string> {
+  const mode = await window.api.getConnMode().catch(() => "local");
+  if (mode === "remote" || mode === "ssh") {
+    const c = await window.api.getConnection().catch(() => null);
+    if (mode === "ssh" && c?.ssh) return `ssh ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host}`;
+    if (c) return `${c.host}:${c.port}`;
+    return mode;
+  }
+  return "local";
+}
+
+function showBackendDown(code: number | null) {
   backendDown = true;
   setBusy(false);
-  if (document.getElementById("backend-banner")) return; // never stack two banners
-  const bar = document.createElement("div");
-  bar.id = "backend-banner";
-  bar.innerHTML = `Backend process exited (code=${code}). <button class="primary restart">Restart backend</button>`;
-  bar.querySelector(".restart")!.addEventListener("click", async () => {
-    // remove the banner first: while the restart is in flight the main process
-    // sends "backend-url", and the onBackendUrl listener must not race with us
-    bar.remove();
-    backendDown = false;
-    try {
-      await window.api.restartBackend(S.root);
-    } catch (e) {
-      showBackendBanner(null);
-      return;
-    }
-    // S.root is null when the first start failed (no project was ever opened);
-    // the main process may have started the backend with the last project instead
-    const r = S.root || S.pendingRoot || (await window.api.getBackendRoot());
-    S.pendingRoot = null;
-    if (r) await openProject(r);
-  });
-  document.body.appendChild(bar);
+  const chip = $("backend-status");
+  void (async () => {
+    const mode = await window.api.getConnMode().catch(() => "local");
+    const detail = await backendDownDetail();
+    const action = mode === "local" ? "restart the backend" : "reconnect / change the connection";
+    chip.textContent = `Backend down (${detail}) — ${action}`;
+    chip.title = mode === "local"
+      ? `Backend process exited (code=${code}).\nClick to restart the backend.`
+      : `Cannot connect to the agent server at ${detail}.\nClick to open Settings > Remote server (the GUI keeps retrying in the background).`;
+    chip.classList.remove("hidden");
+  })();
 }
+
+function clearBackendDown() {
+  if (!backendDown) return;
+  backendDown = false;
+  $("backend-status").classList.add("hidden");
+}
+
+// chip click: local mode restarts the bundled backend; remote/ssh prints a hint
+// (the Settings dialog needs a live backend to load its fields, so it is only
+// offered once the connection is back - the GUI retries in the background)
+$("backend-status").addEventListener("click", async () => {
+  const mode = await window.api.getConnMode().catch(() => "local");
+  if (mode !== "local") {
+    const detail = await backendDownDetail();
+    chat.line(`\n[backend down: cannot reach ${detail}; the GUI keeps retrying. When it reconnects, open Settings > Remote server to change the address/port.]`, "c-warn");
+    return;
+  }
+  // remove the chip first: while the restart is in flight the main process
+  // sends "backend-url", and the onBackendUrl listener must not race with us
+  clearBackendDown();
+  try {
+    await window.api.restartBackend(S.root);
+  } catch (e) {
+    showBackendDown(null);
+    return;
+  }
+  // S.root is null when the first start failed (no project was ever opened);
+  // the main process may have started the backend with the last project instead
+  const r = S.root || S.pendingRoot || (await window.api.getBackendRoot());
+  S.pendingRoot = null;
+  if (r) await openProject(r);
+});
 
 let bootDone = false; // boot() owns backend-exit handling until it finishes
 window.api.onBackendExit((code) => {
   if (backendDown || !bootDone) return;
   chat.line(`\n[backend exited (code=${code})]`, "c-error");
-  showBackendBanner(code);
+  showBackendDown(code);
 });
 
 // last backend URL we (re)connected to: a change means a new backend process /
@@ -3540,11 +3571,7 @@ window.api.onBackendUrl(async (url: string) => {
   const urlChanged = url !== lastBackendUrl;
   lastBackendUrl = url;
   if (!backendDown && !urlChanged) return;
-  if (backendDown) {
-    backendDown = false;
-    const banner = document.getElementById("backend-banner");
-    if (banner) banner.remove();
-  }
+  clearBackendDown();
   const r = S.root || (await resolveProjectRoot());
   if (!r) { $("state-label").textContent = "Connected"; return; }
   await openProject(r);
@@ -3579,7 +3606,7 @@ window.api.onBackendUrl(async (url: string) => {
     window.api.getBackendUrl().then((u) => u && finish(u));
   });
   if (!url) {
-    showBackendBanner(null);
+    showBackendDown(null);
     $("state-label").textContent = "Backend not running";
     bootProjectDone = true;
     return;

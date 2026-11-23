@@ -63,13 +63,14 @@ function check(label, ok) {
     check("booted in remote mode", connected);
 
     // the server's first bind can be slow, so the GUI's first connect may fail
-    // and show the banner. Recover deterministically: if the banner is up,
-    // click Restart, then wait until a real RPC (ping) succeeds.
+    // and show the backend-down status chip. Recover deterministically: if the
+    // chip is up, click it (remote mode: opens Settings; local: restarts),
+    // then wait until a real RPC (ping) succeeds.
     async function ensureConnected() {
       for (let i = 0; i < 40; i++) {
-        const banner = await evalJs("!!document.getElementById('backend-banner')");
+        const banner = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (banner) {
-          await evalJs("const b=document.querySelector('#backend-banner .restart'); b && b.click()");
+          await evalJs("document.getElementById('backend-status').click()");
           await wait(1500);
         }
         const pong = await evalJs(`(async () => {

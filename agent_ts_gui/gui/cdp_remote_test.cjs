@@ -136,17 +136,17 @@ function check(label, ok) {
       await wait(1500);
       let banner = false;
       for (let i = 0; i < 30; i++) {
-        banner = await evalJs("!!document.getElementById('backend-banner')");
+        banner = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (banner) break;
         await wait(500);
       }
-      check("banner shown when the remote server dies", banner);
+      check("backend-down chip shown when the remote server dies", banner);
       check("auto-reconnect is retrying", appLog().includes("remote ws closed, retry"));
       // restart the server: the GUI must reconnect without any user action
       startSrv();
       let restored = false;
       for (let i = 0; i < 60; i++) {
-        const b = await evalJs("!!document.getElementById('backend-banner')");
+        const b = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (!b) { restored = true; break; }
         await wait(500);
       }

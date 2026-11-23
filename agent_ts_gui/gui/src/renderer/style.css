@@ -964,27 +964,23 @@ fieldset.grp legend { font-weight: bold; padding: 0 6px; }
 .modal.dumps .dview { flex: 1; overflow: auto; }
 .modal.dumps .dview pre { margin: 0; padding: 8px; background: var(--code-bg); border-radius: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 
-/* backend-down banner */
-#backend-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 300;
-  background: var(--error);
-  color: #fff;
-  padding: 8px 14px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-weight: bold;
-}
-#backend-banner button {
+/* backend-down status (non-blocking chip at the left end of the status bar) */
+#backend-status {
+  flex: none;
+  max-width: 45%;
+  padding: 1px 8px;
+  border: 1px solid var(--error);
+  border-radius: 8px;
   background: var(--panel);
   color: var(--error);
-  border: none;
+  font-size: 12px;
   font-weight: bold;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+#backend-status:hover { background: var(--hover); }
 
 /* inline question panel above the input box (approvals and ask_user) */
 #ask-panel {
