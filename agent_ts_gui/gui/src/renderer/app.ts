@@ -1803,11 +1803,8 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       `<div class="field"><span class="lbl">port</span><input type="number" class="c-port"/></div>` +
       `</div>` +
       `<div class="c-sshgrp" style="display:none">` +
-      `<div class="field"><span class="lbl">ssh host</span><input type="text" class="c-ssh-host" placeholder="remote machine"/></div>` +
-      `<div class="field"><span class="lbl">ssh user</span><input type="text" class="c-ssh-user" placeholder="(blank = default user)"/></div>` +
-      `<div class="field"><span class="lbl">ssh port</span><input type="number" class="c-ssh-port" placeholder="22"/></div>` +
-      `<div class="field"><span class="lbl">identity</span><input type="text" class="c-ssh-identity" placeholder="identity file (blank = ssh agent; password dialog if the server asks)"/></div>` +
-      `<div class="field"><span class="lbl">server port</span><input type="number" class="c-ssh-rport" placeholder="coder-agent-server port on the remote machine"/></div>` +
+      `<div class="field"><span class="lbl">target</span><span class="c-ssh-summary" style="flex:1;min-width:0"></span></div>` +
+      `<div class="tip" style="font-size:11px;color:var(--text-soft2)">Apply &amp; reconnect opens a small window for <b>user@host</b> and then asks for the SSH password.</div>` +
       `</div>` +
       `<div class="field"><span class="lbl">token</span><input type="text" class="c-token" placeholder="shared secret (server started with --token)"/></div>` +
       `</fieldset>` +
@@ -1816,7 +1813,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       `<div class="tip" style="font-size:11px;color:var(--text-soft2)">Local mode: the backend runs on this machine and is started automatically. ` +
       `Remote mode: run "coder-agent-server --host 0.0.0.0 --port &lt;port&gt; --token &lt;secret&gt;" on the server machine, ` +
       `then connect here. SSH mode: the app opens "ssh -N -L &lt;local&gt;:127.0.0.1:&lt;server port&gt; &lt;user&gt;@&lt;host&gt;" and connects through it, ` +
-      `so the server only needs to listen on loopback (no exposed port, no firewall changes; key-based ssh required). ` +
+      `so the server only needs to listen on loopback (no exposed port, no firewall changes; password or key login). ` +
       `One server serves one GUI; the project paths are on the server machine. ` +
       `The connection is saved in this app's user data and used at next start.</div>`;
     void (async () => {
@@ -1825,13 +1822,9 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       (cPage.querySelector(".c-host") as HTMLInputElement).value = c.host;
       (cPage.querySelector(".c-port") as HTMLInputElement).value = String(c.port);
       (cPage.querySelector(".c-token") as HTMLInputElement).value = c.token;
-      if (c.ssh) {
-        (cPage.querySelector(".c-ssh-host") as HTMLInputElement).value = c.ssh.host;
-        (cPage.querySelector(".c-ssh-user") as HTMLInputElement).value = c.ssh.user;
-        (cPage.querySelector(".c-ssh-port") as HTMLInputElement).value = c.ssh.port === 22 ? "" : String(c.ssh.port);
-        (cPage.querySelector(".c-ssh-identity") as HTMLInputElement).value = c.ssh.identity;
-        (cPage.querySelector(".c-ssh-rport") as HTMLInputElement).value = String(c.ssh.remotePort);
-      }
+      (cPage.querySelector(".c-ssh-summary") as HTMLElement).textContent = c.ssh
+        ? `${c.ssh.user}@${c.ssh.host}${c.ssh.port !== 22 ? ":" + c.ssh.port : ""} (agent server port ${c.ssh.remotePort})`
+        : "not set";
       syncConnFields(cPage);
     })();
     // show/hide the direct host:port vs ssh target fields per mode
@@ -1851,18 +1844,28 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       btn.disabled = true;
       m.className = "msg"; m.textContent = "Reconnecting...";
       const mode = (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote" | "ssh";
+      if (mode === "ssh") {
+        m.textContent = "Enter the SSH login in the window that opened (a password window follows)...";
+        const sr = await window.api.sshConnect({
+          token: (cPage.querySelector(".c-token") as HTMLInputElement).value,
+          root: S.root,
+        });
+        btn.disabled = false;
+        if (!sr.ok) {
+          if (sr.error === "cancelled") { m.textContent = ""; return; }
+          showMsg(cPage, false, String(sr.error));
+          return;
+        }
+        showMsg(cPage, true, `Connected to ${sr.url}. The current project will be reopened.`);
+        void refreshRemoteLabel();
+        setTimeout(() => done(false), 400);
+        return;
+      }
       const r = await window.api.setConnection({
         mode,
         host: (cPage.querySelector(".c-host") as HTMLInputElement).value.trim() || "127.0.0.1",
         port: Number((cPage.querySelector(".c-port") as HTMLInputElement).value) || 8931,
         token: (cPage.querySelector(".c-token") as HTMLInputElement).value,
-        ssh: {
-          host: (cPage.querySelector(".c-ssh-host") as HTMLInputElement).value.trim(),
-          user: (cPage.querySelector(".c-ssh-user") as HTMLInputElement).value.trim(),
-          port: Number((cPage.querySelector(".c-ssh-port") as HTMLInputElement).value) || 22,
-          identity: (cPage.querySelector(".c-ssh-identity") as HTMLInputElement).value.trim(),
-          remotePort: Number((cPage.querySelector(".c-ssh-rport") as HTMLInputElement).value) || 8931,
-        },
         // the project currently open: the new local backend is started with it
         root: S.root,
       });
@@ -3554,6 +3557,11 @@ let bootDone = false; // boot() owns backend-exit handling until it finishes
 // while the user is editing the connection fields.
 let settingsOpen = false;
 let reopenPending = false; // a re-open is deferred until the dialog closes
+
+window.api.onConnError((msg) => {
+  if (!settingsOpen) chat.line(`\n[connection] ${msg}`, "c-error");
+});
+void window.api.getConnError().then((msg) => { if (msg) chat.line(`\n[connection] ${msg}`, "c-error"); });
 
 window.api.onBackendExit((code) => {
   if (backendDown || !bootDone) return;

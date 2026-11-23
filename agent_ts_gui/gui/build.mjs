@@ -3,7 +3,7 @@ import { build } from "esbuild";
 import { cpSync, rmSync } from "node:fs";
 
 await build({
-  entryPoints: ["src/main/index.ts", "src/preload/index.ts"],
+  entryPoints: ["src/main/index.ts", "src/preload/index.ts", "src/preload/prompt.ts"],
   outdir: "dist",
   outbase: "src",
   bundle: true,

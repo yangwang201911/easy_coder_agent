@@ -33,6 +33,9 @@ export interface Api {
   getConnection: () => Promise<Connection>;
   getConnMode: () => Promise<"local" | "remote" | "ssh">;
   setConnection: (c: Connection & { root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
+  sshConnect: (o: { token?: string; root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
+  getConnError: () => Promise<string>;
+  onConnError: (cb: (msg: string) => void) => void;
   winMinimize: () => Promise<void>;
   winToggleMaximize: () => Promise<boolean>;
   winIsMaximized: () => Promise<boolean>;

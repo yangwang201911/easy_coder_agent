@@ -1,6 +1,6 @@
 // Preload: type-safe bridge between renderer and main.
 import { contextBridge, ipcRenderer } from "electron";
-import type { AgentEvent, ReplyMsg } from "../types";
+import type { AgentEvent, ReplyMsg, Connection } from "../types";
 
 contextBridge.exposeInMainWorld("api", {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke("backend-url"),
@@ -19,9 +19,12 @@ contextBridge.exposeInMainWorld("api", {
   getLastProject: (): Promise<string | null> => ipcRenderer.invoke("last-project"),
   setLastProject: (p: string): Promise<void> => ipcRenderer.invoke("set-last-project", p),
   restartBackend: (root: string | null): Promise<void> => ipcRenderer.invoke("restart-backend", root),
-  getConnection: (): Promise<{ mode: string; host: string; port: number; token: string }> => ipcRenderer.invoke("get-connection"),
-  getConnMode: (): Promise<"local" | "remote"> => ipcRenderer.invoke("conn-mode"),
-  setConnection: (c: { mode: string; host: string; port: number; token: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("set-connection", c),
+  getConnection: (): Promise<Connection> => ipcRenderer.invoke("get-connection"),
+  getConnMode: (): Promise<"local" | "remote" | "ssh"> => ipcRenderer.invoke("conn-mode"),
+  sshConnect: (o: { token?: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("ssh-connect", o),
+  getConnError: (): Promise<string> => ipcRenderer.invoke("get-conn-error"),
+  onConnError: (cb: (msg: string) => void) => ipcRenderer.on("conn-error", (_e, msg) => cb(msg)),
+  setConnection: (c: Connection & { root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("set-connection", c),
   winMinimize: (): Promise<void> => ipcRenderer.invoke("win-minimize"),
   winToggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("win-toggle-maximize"),
   winIsMaximized: (): Promise<boolean> => ipcRenderer.invoke("win-is-maximized"),
