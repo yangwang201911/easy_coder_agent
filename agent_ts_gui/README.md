@@ -242,6 +242,49 @@ restarted from the toolbar crash banner, and is killed on quit.
 If it cannot start, the window shows a "Backend process exited" banner with
 a Restart button.
 
+## Remote server (GUI on one machine, agent on another)
+
+The GUI can drive a `coder-agent-server` running on another machine. The
+project paths live on the server machine; the GUI is a pure interface.
+Settings > Remote server offers two remote modes:
+
+### Direct (remote mode)
+
+Run the server on the target machine, bound to the network with a token:
+
+```bash
+python -m coder_agent.server --host 0.0.0.0 --port 8931 \
+  --root /path/to/project --token "$(openssl rand -hex 16)"
+```
+
+Then in the GUI set mode **remote**, host/port/token. The token is the only
+protection on the wire — anyone on the network who has it can drive the
+agent, so use a strong one.
+
+### SSH tunnel (ssh mode, recommended)
+
+Like VS Code Remote-SSH: the GUI opens
+`ssh -N -L <local>:127.0.0.1:<server port> <user>@<host>` itself and connects
+through the local port. The server only listens on loopback, no port is
+exposed, no firewall changes, and authentication is your normal ssh key
+setup (including `ProxyJump` via `~/.ssh/config` aliases — the ssh host field
+accepts anything `ssh` accepts).
+
+On the server machine:
+
+```bash
+python -m coder_agent.server --host 127.0.0.1 --port 8931 --root /path/to/project
+```
+
+In the GUI set mode **ssh**, fill ssh host/user (blank = default), ssh port
+(blank = 22), identity file (blank = ssh agent/config), and the server port.
+Key-based ssh is required (password prompts are not supported; the tunnel
+fails fast instead). If the tunnel drops, the GUI reconnects automatically
+(restarts the tunnel + the socket, same backoff as remote mode).
+
+Windows ships OpenSSH (`ssh.exe`) since Windows 10, so ssh mode works out of
+the box. Closing the GUI never cancels a running turn on the server.
+
 ## Notes
 
 - The GUI owns the Python backend: it starts it on launch, restarts it on

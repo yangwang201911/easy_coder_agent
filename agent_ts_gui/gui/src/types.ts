@@ -31,7 +31,7 @@ export interface Api {
   setLastProject: (p: string) => Promise<void>;
   restartBackend: (root: string | null) => Promise<void>;
   getConnection: () => Promise<Connection>;
-  getConnMode: () => Promise<"local" | "remote">;
+  getConnMode: () => Promise<"local" | "remote" | "ssh">;
   setConnection: (c: Connection & { root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
   winMinimize: () => Promise<void>;
   winToggleMaximize: () => Promise<boolean>;
@@ -39,11 +39,20 @@ export interface Api {
   winClose: () => Promise<void>;
 }
 
+export interface SshTarget {
+  host: string;
+  user: string;
+  port: number;        // ssh port, 0 = default 22
+  identity: string;    // identity file path, "" = default ssh agent/config
+  remotePort: number;  // coder-agent-server port on the remote machine
+}
+
 export interface Connection {
-  mode: "local" | "remote";
+  mode: "local" | "remote" | "ssh";
   host: string;
   port: number;
   token: string;
+  ssh?: SshTarget;
 }
 
 declare global {

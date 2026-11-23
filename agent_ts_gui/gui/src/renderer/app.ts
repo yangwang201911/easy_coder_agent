@@ -330,10 +330,15 @@ async function refreshConnLabel() {
   const mode = await window.api.getConnMode().catch(() => "local");
   const text = $("conn-mode-text");
   const btn = $("conn-mode-label");
-  if (mode === "remote") {
+  if (mode === "remote" || mode === "ssh") {
     const c = await window.api.getConnection().catch(() => null);
-    text.textContent = c ? `Remote ${c.host}:${c.port}` : "Remote";
-    btn.title = `Connected to remote agent server ${c ? c.host + ":" + c.port : ""}\nClick to change the connection (Settings > Remote server)`;
+    if (mode === "ssh" && c?.ssh) {
+      text.textContent = `SSH ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host}`;
+      btn.title = `Connected via ssh tunnel to ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host} (server port ${c.ssh.remotePort})\nClick to change the connection (Settings > Remote server)`;
+    } else {
+      text.textContent = c ? `Remote ${c.host}:${c.port}` : "Remote";
+      btn.title = `Connected to remote agent server ${c ? c.host + ":" + c.port : ""}\nClick to change the connection (Settings > Remote server)`;
+    }
   } else {
     text.textContent = "Local";
     btn.title = "Agent runs on this machine (local mode). Click for Settings > Remote server";
@@ -383,8 +388,9 @@ async function openProject(root: string, sessionId: string | null = null) {
     // under its folder name so it can be re-opened by name next time. The
     // mode follows the connection: the path is on the machine the backend
     // runs on (this machine in local mode, the server in remote mode).
-    const connMode = (await window.api.getConnMode().catch(() => "local")) as "local" | "remote";
-    saved = { name: r.root.split(/[\\/]/).filter(Boolean).pop() ?? r.root, mode: connMode, path: r.root };
+    const connMode = (await window.api.getConnMode().catch(() => "local")) as "local" | "remote" | "ssh";
+    // ssh mode's project lives on the server machine too: store it as "remote"
+    saved = { name: r.root.split(/[\\/]/).filter(Boolean).pop() ?? r.root, mode: connMode === "local" ? "local" : "remote", path: r.root };
     rememberProject(saved.name, saved.mode, saved.path);
   }
   setLastProjectName(saved.name);
@@ -1790,16 +1796,27 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
     const cPage = modal.querySelector<HTMLElement>('.page[data-p="connection"]')!;
     cPage.innerHTML =
       `<fieldset class="grp"><legend>Remote server</legend>` +
-      `<div class="field"><span class="lbl">mode</span><select class="c-mode"><option value="local">local (this machine, auto-started)</option><option value="remote">remote (coder-agent-server on another machine)</option></select></div>` +
+      `<div class="field"><span class="lbl">mode</span><select class="c-mode"><option value="local">local (this machine, auto-started)</option><option value="remote">remote (coder-agent-server on another machine)</option><option value="ssh">ssh (tunnel to a remote machine)</option></select></div>` +
+      `<div class="c-direct">` +
       `<div class="field"><span class="lbl">host</span><input type="text" class="c-host"/></div>` +
       `<div class="field"><span class="lbl">port</span><input type="number" class="c-port"/></div>` +
+      `</div>` +
+      `<div class="c-sshgrp" style="display:none">` +
+      `<div class="field"><span class="lbl">ssh host</span><input type="text" class="c-ssh-host" placeholder="remote machine"/></div>` +
+      `<div class="field"><span class="lbl">ssh user</span><input type="text" class="c-ssh-user" placeholder="(blank = default user)"/></div>` +
+      `<div class="field"><span class="lbl">ssh port</span><input type="number" class="c-ssh-port" placeholder="22"/></div>` +
+      `<div class="field"><span class="lbl">identity</span><input type="text" class="c-ssh-identity" placeholder="identity file (blank = ssh agent/config)"/></div>` +
+      `<div class="field"><span class="lbl">server port</span><input type="number" class="c-ssh-rport" placeholder="coder-agent-server port on the remote machine"/></div>` +
+      `</div>` +
       `<div class="field"><span class="lbl">token</span><input type="text" class="c-token" placeholder="shared secret (server started with --token)"/></div>` +
       `</fieldset>` +
       `<div class="btnrow"><button class="c-apply">Apply &amp; reconnect</button></div>` +
       `<div class="msg"></div>` +
       `<div class="tip" style="font-size:11px;color:var(--text-soft2)">Local mode: the backend runs on this machine and is started automatically. ` +
       `Remote mode: run "coder-agent-server --host 0.0.0.0 --port &lt;port&gt; --token &lt;secret&gt;" on the server machine, ` +
-      `then connect here. One server serves one GUI; the project paths are on the server machine. ` +
+      `then connect here. SSH mode: the app opens "ssh -N -L &lt;local&gt;:127.0.0.1:&lt;server port&gt; &lt;user&gt;@&lt;host&gt;" and connects through it, ` +
+      `so the server only needs to listen on loopback (no exposed port, no firewall changes; key-based ssh required). ` +
+      `One server serves one GUI; the project paths are on the server machine. ` +
       `The connection is saved in this app's user data and used at next start.</div>`;
     void (async () => {
       const c = await window.api.getConnection();
@@ -1807,22 +1824,44 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       (cPage.querySelector(".c-host") as HTMLInputElement).value = c.host;
       (cPage.querySelector(".c-port") as HTMLInputElement).value = String(c.port);
       (cPage.querySelector(".c-token") as HTMLInputElement).value = c.token;
+      if (c.ssh) {
+        (cPage.querySelector(".c-ssh-host") as HTMLInputElement).value = c.ssh.host;
+        (cPage.querySelector(".c-ssh-user") as HTMLInputElement).value = c.ssh.user;
+        (cPage.querySelector(".c-ssh-port") as HTMLInputElement).value = c.ssh.port === 22 ? "" : String(c.ssh.port);
+        (cPage.querySelector(".c-ssh-identity") as HTMLInputElement).value = c.ssh.identity;
+        (cPage.querySelector(".c-ssh-rport") as HTMLInputElement).value = String(c.ssh.remotePort);
+      }
+      syncConnFields(cPage);
     })();
-    // local mode always talks to this machine: keep the host field in sync
+    // show/hide the direct host:port vs ssh target fields per mode
+    function syncConnFields(page: HTMLElement) {
+      const mode = (page.querySelector(".c-mode") as HTMLSelectElement).value;
+      (page.querySelector(".c-direct") as HTMLElement).style.display = mode === "remote" ? "" : "none";
+      (page.querySelector(".c-sshgrp") as HTMLElement).style.display = mode === "ssh" ? "" : "none";
+    }
     (cPage.querySelector(".c-mode") as HTMLSelectElement).addEventListener("change", (e) => {
-      if ((e.target as HTMLSelectElement).value === "local")
-        (cPage.querySelector(".c-host") as HTMLInputElement).value = "127.0.0.1";
+      const v = (e.target as HTMLSelectElement).value;
+      if (v === "local") (cPage.querySelector(".c-host") as HTMLInputElement).value = "127.0.0.1";
+      syncConnFields(cPage);
     });
     cPage.querySelector(".c-apply")!.addEventListener("click", async () => {
       const m = cPage.querySelector(".msg") as HTMLElement;
       const btn = cPage.querySelector(".c-apply") as HTMLButtonElement;
       btn.disabled = true;
       m.className = "msg"; m.textContent = "Reconnecting...";
+      const mode = (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote" | "ssh";
       const r = await window.api.setConnection({
-        mode: (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote",
+        mode,
         host: (cPage.querySelector(".c-host") as HTMLInputElement).value.trim() || "127.0.0.1",
         port: Number((cPage.querySelector(".c-port") as HTMLInputElement).value) || 8931,
         token: (cPage.querySelector(".c-token") as HTMLInputElement).value,
+        ssh: {
+          host: (cPage.querySelector(".c-ssh-host") as HTMLInputElement).value.trim(),
+          user: (cPage.querySelector(".c-ssh-user") as HTMLInputElement).value.trim(),
+          port: Number((cPage.querySelector(".c-ssh-port") as HTMLInputElement).value) || 22,
+          identity: (cPage.querySelector(".c-ssh-identity") as HTMLInputElement).value.trim(),
+          remotePort: Number((cPage.querySelector(".c-ssh-rport") as HTMLInputElement).value) || 8931,
+        },
         // the project currently open: the new local backend is started with it
         root: S.root,
       });
@@ -2920,12 +2959,16 @@ $("settings-btn").addEventListener("click", () => {
 async function refreshRemoteLabel() {
   const el = $("remote-label");
   const mode = await window.api.getConnMode().catch(() => "local");
-  if (mode !== "remote") { el.classList.add("hidden"); el.textContent = ""; return; }
+  if (mode !== "remote" && mode !== "ssh") { el.classList.add("hidden"); el.textContent = ""; return; }
   const c = await window.api.getConnection().catch(() => null);
   if (!c) { el.classList.add("hidden"); return; }
-  const text = `remote: ${c.host}:${c.port}`;
+  const text = mode === "ssh" && c.ssh
+    ? `ssh: ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host}`
+    : `remote: ${c.host}:${c.port}`;
   el.textContent = text;
-  el.title = `Connected to remote agent server ${c.host}:${c.port}${c.token ? " (token set)" : ""}\nClick to change the connection.`;
+  el.title = mode === "ssh" && c.ssh
+    ? `Connected via ssh tunnel to ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host} (server port ${c.ssh.remotePort})\nClick to change the connection.`
+    : `Connected to remote agent server ${c.host}:${c.port}${c.token ? " (token set)" : ""}\nClick to change the connection.`;
   el.classList.remove("hidden");
 }
 $("remote-label").addEventListener("click", () => {
@@ -2986,7 +3029,7 @@ async function openProjectNamed(name: string, mode: "local" | "remote", path: st
   // a "local" project is a path on THIS machine; in remote mode the server
   // lives on another machine and cannot see it
   const connMode = await window.api.getConnMode().catch(() => "local");
-  if (connMode === "remote" && mode === "local") {
+  if ((connMode === "remote" || connMode === "ssh") && mode === "local") {
     chat.line(`\n[error] project "${name}" (${path}) is on this machine, but the agent server runs remotely. Remove it and add the folder on the server instead.`, "c-error");
     return;
   }
@@ -3130,7 +3173,8 @@ async function projectsDialog(): Promise<void> {
   // in remote mode the project paths live on the server machine, so a native
   // folder dialog on this machine would pick paths the server cannot see; the
   // dialog therefore only shows projects matching the current connection mode
-  const remoteMode = (await window.api.getConnMode().catch(() => "local")) === "remote";
+  const cm = await window.api.getConnMode().catch(() => "local");
+  const remoteMode = cm === "remote" || cm === "ssh";
   const list = loadProjects().filter((p) => p.mode === (remoteMode ? "remote" : "local"));
   const last = lastProjectName();
   const modal = $("modal");
@@ -3441,7 +3485,8 @@ let bootProjectDone = false;
 async function resolveProjectRoot(): Promise<string | null> {
   const last = lastProjectName();
   const savedLast = last ? loadProjects().find((p) => p.name === last) : null;
-  const remoteConn = (await window.api.getConnMode().catch(() => "local")) === "remote";
+  const cm = await window.api.getConnMode().catch(() => "local");
+  const remoteConn = cm === "remote" || cm === "ssh";
   let root: string | null = null;
   if (savedLast && (!remoteConn || savedLast.mode === "remote")) root = savedLast.path;
   if (!root) root = S.pendingRoot;

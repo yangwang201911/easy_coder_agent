@@ -5,6 +5,7 @@ import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import WebSocket from "ws";
+import * as net from "node:net";
 import { backendUrlFromLine } from "./backend-output";
 
 // Backend location: in dev the repo's backend/ dir + its venv python; in a
@@ -36,12 +37,18 @@ let reconnecting = false; // suppress "backend-exit" while switching connections
 let remoteReconnect = false; // auto-reconnect is active for the current remote connection
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectDelay = 1000; // ms, grows x2 up to 15s
+let tunnel: ChildProcess | null = null; // ssh -N -L child (ssh mode only)
+let tunnelPort = 0; // local port the tunnel forwards to the remote server
 
 // ------------------------------------------------------------- connection
 // mode "local"  = spawn the bundled backend on this machine (default, as before).
 // mode "remote" = connect to a coder-agent-server running on another machine
 // (or on this machine, started separately). One server serves one GUI.
-interface Connection { mode: "local" | "remote"; host: string; port: number; token: string; }
+// mode "ssh"    = like remote, but the GUI opens an ssh tunnel
+// (ssh -N -L localPort:127.0.0.1:remotePort user@host) and connects to the
+// local port; the server only needs to listen on loopback on the remote box.
+interface SshTarget { host: string; user: string; port: number; identity: string; remotePort: number; }
+interface Connection { mode: "local" | "remote" | "ssh"; host: string; port: number; token: string; ssh?: SshTarget; }
 const DEFAULT_CONN: Connection = { mode: "local", host: "127.0.0.1", port: 8931, token: "" };
 let conn: Connection = { ...DEFAULT_CONN };
 
@@ -52,8 +59,15 @@ function loadConn(): Connection {
   try {
     if (fs.existsSync(connFile())) {
       const c = JSON.parse(fs.readFileSync(connFile(), "utf8"));
-      return { mode: c.mode === "remote" ? "remote" : "local",
+      const mode = c.mode === "remote" ? "remote" : c.mode === "ssh" ? "ssh" : "local";
+      const conn: Connection = { mode,
         host: String(c.host || "127.0.0.1"), port: Number(c.port) || 8931, token: String(c.token || "") };
+      if (mode === "ssh" && c.ssh) {
+        conn.ssh = { host: String(c.ssh.host || ""), user: String(c.ssh.user || ""),
+          port: Number(c.ssh.port) || 22, identity: String(c.ssh.identity || ""),
+          remotePort: Number(c.ssh.remotePort) || 8931 };
+      }
+      return conn;
     }
   } catch { /* ignore */ }
   return { ...DEFAULT_CONN };
@@ -117,6 +131,78 @@ function startBackend(root: string | null): Promise<string> {
       if (!settled) { settled = true; clearTimeout(timer); reject(e); }
     });
   });
+}
+
+// ------------------------------------------------------------- ssh tunnel
+// Pick a free local TCP port by binding port 0, then releasing it.
+function freeLocalPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+// Start "ssh -N -L <localPort>:127.0.0.1:<remotePort> user@host" and resolve
+// once the local port accepts connections (the forward is up).
+async function startTunnel(t: SshTarget): Promise<number> {
+  stopTunnel();
+  const localPort = await freeLocalPort();
+  const args = [
+    "-N", // no remote command: tunnel only
+    "-o", "BatchMode=yes", // never prompt for a password (fail fast instead)
+    "-o", "ExitOnForwardFailure=yes", // die if the local forward cannot be set up
+    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", // detect dead links
+    "-o", "ConnectTimeout=10",
+    "-p", String(t.port || 22),
+    "-L", `${localPort}:127.0.0.1:${t.remotePort}`,
+    t.user ? `${t.user}@${t.host}` : t.host,
+  ];
+  if (t.identity) args.splice(1, 0, "-i", t.identity);
+  console.log("[main] starting ssh tunnel:", "ssh", args.join(" "));
+  const proc = spawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"] });
+  tunnel = proc;
+  proc.stdout?.on("data", (d: Buffer) => process.stdout.write(`[ssh] ${d.toString()}`));
+  proc.stderr?.on("data", (d: Buffer) => process.stderr.write(`[ssh] ${d.toString()}`));
+  proc.on("exit", (code) => {
+    if (tunnel !== proc) return; // superseded by a new tunnel / switch
+    tunnel = null;
+    console.log(`[main] ssh tunnel exited (code=${code})`);
+    // the socket dies with the tunnel; its close event (remoteReconnect) will
+    // restart the tunnel + ws. If the socket is already gone, trigger it here.
+    if (remoteReconnect && !quitting) {
+      if (ws) { try { ws.close(); } catch { /* ignore */ } }
+      else if (window && !window.isDestroyed()) {
+        window.webContents.send("backend-exit", null);
+        scheduleReconnect(`ws://127.0.0.1:${tunnelPort}`, conn.token);
+      }
+    }
+  });
+  // wait until the local forward accepts connections (or the tunnel dies)
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    if (tunnel !== proc) throw new Error("ssh tunnel exited before it was ready");
+    const ok = await new Promise<boolean>((resolve) => {
+      const s = net.connect(localPort, "127.0.0.1");
+      s.once("connect", () => { s.destroy(); resolve(true); });
+      s.once("error", () => { s.destroy(); resolve(false); });
+    });
+    if (ok) { tunnelPort = localPort; console.log("[main] ssh tunnel up on 127.0.0.1:" + localPort); return localPort; }
+    if (Date.now() > deadline) throw new Error("ssh tunnel did not come up within 15s (check host/user/identity, or that ssh allows TCP forwarding)");
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+function stopTunnel() {
+  if (tunnel) {
+    const old = tunnel;
+    tunnel = null;
+    try { old.kill("SIGTERM"); } catch { /* ignore */ }
+    setTimeout(() => { try { old.kill("SIGKILL"); } catch { /* ignore */ } }, 2000);
+  }
 }
 
 // ------------------------------------------------------------- ws bridge
@@ -189,9 +275,15 @@ function scheduleReconnect(url: string, token: string) {
     reconnectTimer = null;
     if (!remoteReconnect || quitting) return;
     try {
-      await connectWs(url, token);
+      let u = url;
+      if (conn.mode === "ssh" && conn.ssh) {
+        // the tunnel died with (or before) the socket: bring up a fresh one
+        const p = await startTunnel(conn.ssh);
+        u = `ws://127.0.0.1:${p}`;
+      }
+      await connectWs(u, token);
       reconnectDelay = 1000;
-      if (window && !window.isDestroyed()) window.webContents.send("backend-url", url);
+      if (window && !window.isDestroyed()) window.webContents.send("backend-url", u);
     } catch (e) {
       console.log("[main] remote reconnect failed:", e);
       if (window && !window.isDestroyed()) window.webContents.send("backend-exit", null);
@@ -207,7 +299,7 @@ function lastProjectFile(): string {
 }
 
 function lastProject(): string | null {
-  if (conn.mode === "remote") return null; // the path lives on the server machine
+  if (conn.mode !== "local") return null; // the path lives on the server machine
   const p = lastProjectFile();
   if (fs.existsSync(p)) {
     const last = fs.readFileSync(p, "utf8").trim();
@@ -245,9 +337,16 @@ async function createWindowAsync(root: string | null) {
   window.loadFile(path.join(__dirname, "../renderer/index.html"));
   const startRoot = root ?? lastProject();
   let url: string;
-  if (conn.mode === "remote") {
-    url = `ws://${conn.host}:${conn.port}`;
-    console.log("[main] remote mode, connecting to", url);
+  if (conn.mode === "remote" || conn.mode === "ssh") {
+    if (conn.mode === "ssh") {
+      if (!conn.ssh) throw new Error("ssh mode is set but no ssh target is configured (Settings > Remote server)");
+      const p = await startTunnel(conn.ssh);
+      url = `ws://127.0.0.1:${p}`;
+      console.log("[main] ssh mode, tunnel up, connecting to", url);
+    } else {
+      url = `ws://${conn.host}:${conn.port}`;
+      console.log("[main] remote mode, connecting to", url);
+    }
     remoteReconnect = true; // keep trying if the link drops later
     reconnectDelay = 1000;
     try {
@@ -404,18 +503,27 @@ app.whenReady().then(() => {
     return doSetConnection(c);
   });
   async function doSetConnection(c: any): Promise<object> {
-    // switch local <-> remote. c: {mode, host, port, token}
+    // switch local <-> remote <-> ssh. c: {mode, host, port, token, ssh?}
+    const mode = c.mode === "remote" ? "remote" : c.mode === "ssh" ? "ssh" : "local";
     const next: Connection = {
-      mode: c.mode === "remote" ? "remote" : "local",
+      mode,
       host: String(c.host || "127.0.0.1"),
       port: Number(c.port) || 8931,
       token: String(c.token || ""),
     };
-    if (next.mode === conn.mode && next.host === conn.host && next.port === conn.port && next.token === conn.token)
+    if (mode === "ssh") {
+      next.ssh = { host: String(c.ssh?.host || ""), user: String(c.ssh?.user || ""),
+        port: Number(c.ssh?.port) || 22, identity: String(c.ssh?.identity || ""),
+        remotePort: Number(c.ssh?.remotePort) || 8931 };
+      if (!next.ssh.host) return { ok: false, error: "ssh host is required" };
+    }
+    const sameSsh = JSON.stringify(next.ssh ?? null) === JSON.stringify(conn.ssh ?? null);
+    if (next.mode === conn.mode && next.host === conn.host && next.port === conn.port && next.token === conn.token && sameSsh)
       return { ok: true, reconnected: false };
     saveConn(next);
     // reconnect in place: drop the old connection, then start/connect the new one
     stopReconnect(); // the old socket's close event must not start a remote reconnect
+    stopTunnel();    // leave ssh mode: drop the old tunnel (new one starts below if needed)
     if (backend) {
       const old = backend;
       backend = null;
@@ -430,8 +538,13 @@ app.whenReady().then(() => {
     backendUrl = null;
     try {
       let url: string;
-      if (next.mode === "remote") {
-        url = `ws://${next.host}:${next.port}`;
+      if (next.mode === "remote" || next.mode === "ssh") {
+        if (next.mode === "ssh" && next.ssh) {
+          const p = await startTunnel(next.ssh);
+          url = `ws://127.0.0.1:${p}`;
+        } else {
+          url = `ws://${next.host}:${next.port}`;
+        }
         remoteReconnect = true;
         reconnectDelay = 1000;
         await connectWs(url, next.token);
@@ -474,9 +587,14 @@ app.whenReady().then(() => {
     closeWs();
     try {
       let url: string;
-      if (conn.mode === "remote") {
-        // remote mode: "restart" = reconnect to the remote server
-        url = `ws://${conn.host}:${conn.port}`;
+      if (conn.mode === "remote" || conn.mode === "ssh") {
+        // remote/ssh mode: "restart" = (re)connect to the remote server
+        if (conn.mode === "ssh" && conn.ssh) {
+          const p = await startTunnel(conn.ssh);
+          url = `ws://127.0.0.1:${p}`;
+        } else {
+          url = `ws://${conn.host}:${conn.port}`;
+        }
         remoteReconnect = true;
         reconnectDelay = 1000;
         await connectWs(url, conn.token);
@@ -512,6 +630,7 @@ function killBackend() {
     stopReconnect();
     closeWs();
   }
+  stopTunnel(); // ssh mode: drop the tunnel (the remote server keeps running)
   const proc = backend;
   if (!proc || proc.exitCode !== null || proc.signalCode) { app.quit(); return; }
   const finish = () => {
