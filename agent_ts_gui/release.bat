@@ -38,8 +38,12 @@ if errorlevel 1 goto :deps_stale
 goto :deps_ok
 :deps_stale
 echo node_modules is missing or stale, running npm install...
+rem skip electron's postinstall (it downloads from GitHub, which times out
+rem on restricted networks); the npmmirror fallback below handles the binary.
+set ELECTRON_SKIP_BINARY_DOWNLOAD=1
 call npm install
 if errorlevel 1 exit /b 1
+set ELECTRON_SKIP_BINARY_DOWNLOAD=
 :deps_ok
 rem electron binary: its postinstall downloads from GitHub, which fails on
 rem restricted networks. If it is missing, fetch it from npmmirror ourselves
