@@ -185,7 +185,7 @@ window.api.onReply((msg: ReplyMsg) => {
   else cb(msg.result);
 });
 
-function call(method: string, params: Record<string, any> = {}, opts: { waitReady?: boolean } = {}): Promise<any> {
+function call(method: string, params: Record<string, any> = {}, opts: { waitReady?: boolean; timeoutMs?: number } = {}): Promise<any> {
   const id = ++nextId;
   return new Promise((resolve) => {
     const send = () => {
@@ -197,13 +197,13 @@ function call(method: string, params: Record<string, any> = {}, opts: { waitRead
       }
       setTimeout(() => {
         if (pending.has(id)) { pending.delete(id); resolve({ __error: "request timed out" }); }
-      }, 120000);
+      }, opts.timeoutMs ?? 120000);
     };
     pending.set(id, resolve);
     // the dialog may be opened while the backend is still starting (boot):
     // wait for a connection URL before sending, so the first RPCs succeed
     if (opts.waitReady) {
-      const deadline = Date.now() + 35000;
+      const deadline = Date.now() + (opts.timeoutMs ?? 35000);
       const poll = async () => {
         const u = await window.api.getBackendUrl().catch(() => null);
         if (u) send();
@@ -1578,16 +1578,19 @@ async function openDumpsDialog(): Promise<void> {
 }
 
 async function settingsDialog(initialTab = "model"): Promise<boolean> {
-  // the dialog may be opened while the backend is still starting / reconnecting
-  // (boot, local<->remote switch): queue these RPCs until the socket is ready,
-  // otherwise the Server/Model fields render empty and Save fails.
-  const strategiesR = await call("context_strategies", {}, { waitReady: true });
+  // The dialog must open IMMEDIATELY even when the backend is down: the
+  // Remote server tab is main-process state (no RPC needed) and is exactly
+  // what the user wants to fix when the connection is broken. So: short
+  // timeout on the RPCs that need a live backend (2s) - if the backend is up
+  // they answer instantly, if it is down the dialog opens with local state
+  // and the Server/Model fields fall back to the built-in defaults.
+  const strategiesR = await call("context_strategies", {}, { waitReady: true, timeoutMs: 2000 });
   const strategies: string[] = (strategiesR && !strategiesR.__error) ? strategiesR.strategies : ["summarize", "truncate"];
   // no project open yet: fall back to the built-in defaults so the Server /
   // Model fields are editable (saving then writes the user-wide config only)
   let base = S.config;
   if (!base) {
-    const d = await call("default_config", {}, { waitReady: true });
+    const d = await call("default_config", {}, { waitReady: true, timeoutMs: 2000 });
     base = (d && !d.__error) ? d : null;
   }
   return new Promise((resolve) => {
@@ -2006,7 +2009,22 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
     });
 
     $("modal-backdrop").classList.add("show");
-    const done = (saved: boolean) => { $("modal-backdrop").classList.remove("show"); resolve(saved); };
+    settingsOpen = true;
+    const done = (saved: boolean) => {
+      $("modal-backdrop").classList.remove("show");
+      settingsOpen = false;
+      resolve(saved);
+      // a connection switch applied in the dialog may have reconnected the
+      // backend while it was open: the global backend-url listener deferred
+      // the project re-open (it would have wiped the views under the dialog)
+      if (reopenPending) {
+        reopenPending = false;
+        void (async () => {
+          const r = S.root || (await resolveProjectRoot());
+          if (r) await openProject(r);
+        })();
+      }
+    };
     modal.querySelector(".no")!.addEventListener("click", () => done(false));
     modal.querySelector(".close-x")!.addEventListener("click", () => done(false));
     modal.querySelector(".yes")!.addEventListener("click", async () => {
@@ -3502,14 +3520,15 @@ function clearBackendDown() {
   $("backend-status").classList.add("hidden");
 }
 
-// chip click: local mode restarts the bundled backend; remote/ssh prints a hint
-// (the Settings dialog needs a live backend to load its fields, so it is only
-// offered once the connection is back - the GUI retries in the background)
+// chip click: local mode restarts the bundled backend; remote/ssh opens
+// Settings > Remote server (the dialog opens instantly even while the backend
+// is down, so the address/port can be fixed from here - matches the tooltip)
 $("backend-status").addEventListener("click", async () => {
   const mode = await window.api.getConnMode().catch(() => "local");
   if (mode !== "local") {
     const detail = await backendDownDetail();
-    chat.line(`\n[backend down: cannot reach ${detail}; the GUI keeps retrying. When it reconnects, open Settings > Remote server to change the address/port.]`, "c-warn");
+    chat.line(`\n[backend down: cannot reach ${detail}; the GUI keeps retrying in the background.]`, "c-warn");
+    void settingsDialog("connection").then((saved) => { if (saved) { refreshConnLabel(); chat.line("\n[settings saved]", "c-ok"); } });
     return;
   }
   // remove the chip first: while the restart is in flight the main process
@@ -3529,8 +3548,19 @@ $("backend-status").addEventListener("click", async () => {
 });
 
 let bootDone = false; // boot() owns backend-exit handling until it finishes
+
+// true while the Settings dialog is open: the background reconnect loop must
+// not flash the backend-down chip or re-open the project (wiping the views)
+// while the user is editing the connection fields.
+let settingsOpen = false;
+let reopenPending = false; // a re-open is deferred until the dialog closes
+
 window.api.onBackendExit((code) => {
   if (backendDown || !bootDone) return;
+  if (settingsOpen) {
+    // the user is fixing the connection in the dialog: no chip, no noise
+    return;
+  }
   chat.line(`\n[backend exited (code=${code})]`, "c-error");
   showBackendDown(code);
 });
@@ -3572,6 +3602,12 @@ window.api.onBackendUrl(async (url: string) => {
   lastBackendUrl = url;
   if (!backendDown && !urlChanged) return;
   clearBackendDown();
+  if (settingsOpen) {
+    // the Settings dialog is up (user is fixing the connection): defer the
+    // project re-open until it closes, so the views are not wiped mid-edit
+    reopenPending = true;
+    return;
+  }
   const r = S.root || (await resolveProjectRoot());
   if (!r) { $("state-label").textContent = "Connected"; return; }
   await openProject(r);
