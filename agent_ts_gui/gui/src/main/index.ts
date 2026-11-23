@@ -283,6 +283,10 @@ function scheduleReconnect(url: string, token: string) {
       }
       await connectWs(u, token);
       reconnectDelay = 1000;
+      // the initial connect in createWindowAsync can fail and leave backendUrl
+      // unset; without this the renderer's getBackendUrl() stays null forever
+      // and queued projects (openProjectNamed) are never opened
+      backendUrl = u;
       if (window && !window.isDestroyed()) window.webContents.send("backend-url", u);
     } catch (e) {
       console.log("[main] remote reconnect failed:", e);
