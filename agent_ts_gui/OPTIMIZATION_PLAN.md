@@ -10,7 +10,7 @@
 | 1 | 工具调用并行化（只读并行 / 写串行） | 高 | ✅ | `agent.py` 主循环 |
 | 2 | todo / 任务清单工具 | 高 | ✅ | `tools/interact.py` + 主循环注入 |
 | 3 | LLM 调用重试 + 指数退避 | 高 | ✅ | `llm/openai_compat.py` |
-| 4 | grep_search 换 ripgrep + 上下文行 | 高 | ⬜ | `tools/fs.py` |
+| 4 | grep_search 换 ripgrep + 上下文行 | 高 | ✅ | `tools/fs.py` |
 | 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ⬜ | `context/compression.py` |
 | 6 | 浏览器多 tab | 中 | ⬜ | `tools/browser.py` |
 | 7 | 记忆自动沉淀（turn-end 提取） | 中 | ⬜ | `knowledge.py` |
@@ -46,10 +46,13 @@
   cancel/steer 响应；重试通过 `status` chunk → `warning` 事件通知 GUI。
 - **验证**：backend 全绿（重试路径靠代码审查，无现成 mock 服务器测试）。
 
-### 4. grep_search 换 ripgrep ⬜
+### 4. grep_search 换 ripgrep ✅
 - **问题**：纯 Python 逐文件扫描，大仓库比 `rg` 慢 10-100 倍，无上下文行。
-- **方案**：系统有 `rg` 时优先调用（`--line-number --no-heading --max-count`），
-  否则 fallback 现有实现；新增 `context_lines` 参数（rg `-C`）。
+- **实现**：`HAS_RG` 探测系统 ripgrep，有则走 `_grep_rg`（`--line-number --no-heading
+  --fixed-strings/-i/-C/--glob`，相对路径输出，60s 超时，退出码 1=无匹配）；
+  无则 `_grep_py` fallback（原逻辑 + `context_lines` 上下文行，`-` 标记）。
+  新增 `context_lines` 参数（0-10）。
+- **验证**：`test_grep_search_with_context`（本机无 rg，覆盖 fallback 路径）。
 
 ### 5. 上下文压缩增强 ⬜
 - **问题**：只有全量 LLM 摘要一种粒度；历史里的 screenshot data_url 是 token 大户。
@@ -94,3 +97,6 @@
   修复并行分组中单个 read 工具漏执行的 bug。
 - 2026-11-23：#2（update_todo 工具 + 每步清单注入）完成。
   验证：backend 21 passed，GUI 冒烟全绿（proj_switch/ctxmenu 为存量失败）。
+  已提交 6e41f58。
+- 2026-11-23：#4（grep 换 ripgrep + context_lines）完成。
+  验证：backend 22 passed。

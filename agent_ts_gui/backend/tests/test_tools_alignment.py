@@ -145,6 +145,28 @@ def test_search_unconfigured_raises(ctx, monkeypatch):
         web.web_search(ctx, {"query": "x"})
 
 
+def test_grep_search_with_context(tmp_path):
+    from coder_agent.tools import fs
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("line one\nneedle here\nline three\nline four\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("nothing\nNEEDLE upper\n", encoding="utf-8")
+    ctx = ToolContext(root=tmp_path)
+
+    out = fs.grep_search(ctx, {"pattern": "needle", "path": "src"})
+    assert "a.py:2" in out and "b.py:2" in out  # case-insensitive by default
+    out = fs.grep_search(ctx, {"pattern": "needle", "path": "src", "context_lines": 1})
+    assert "a.py:1- line one" in out and "a.py:3- line three" in out
+    assert "b.py:1- nothing" in out
+    out = fs.grep_search(ctx, {"pattern": "needle", "path": "src", "case_sensitive": True})
+    assert "a.py" in out and "b.py" not in out
+    out = fs.grep_search(ctx, {"pattern": "^line", "path": "src", "is_regex": True, "glob": "*.py"})
+    assert "a.py:1" in out
+    assert fs.grep_search(ctx, {"pattern": "zzz-nope"}) == "(no matches)"
+    with pytest.raises(ToolError, match="invalid regex"):
+        fs.grep_search(ctx, {"pattern": "(", "is_regex": True})
+
+
 def test_route_blocks_unapproved_public_navigation():
     b = browser._Browser()
 
