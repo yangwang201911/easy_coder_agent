@@ -43,7 +43,7 @@ export interface SshTarget {
   host: string;
   user: string;
   port: number;        // ssh port, 0 = default 22
-  identity: string;    // identity file path, "" = default ssh agent/config
+  identity: string;    // identity file path, "" = ssh agent; password is prompted in a dialog if the server asks
   remotePort: number;  // coder-agent-server port on the remote machine
 }
 

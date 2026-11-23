@@ -895,9 +895,12 @@ def run(argv: list[str], provider_factory: ProviderFactory = None) -> int:
         server = Server(Path(args.root) if args.root else None, provider_factory)
         server.token = args.token or ""
         # default max_size is 1 MiB, which a single attached image (sent as a
-        # base64 data URL in the submit RPC) can exceed
+        # base64 data URL in the submit RPC) can exceed. The defaults
+        # ping_interval=20/ping_timeout=20 drop the GUI after 20s of silence
+        # (the event loop can be busy during a long tool call), so relax them.
         srv = await websockets.serve(lambda ws, *args: handler(ws, server), args.host, args.port,
-                                     max_size=64 * 1024 * 1024)
+                                     max_size=64 * 1024 * 1024,
+                                     ping_interval=30, ping_timeout=180)
         port = srv.sockets[0].getsockname()[1]
         # 0.0.0.0 is not a connectable address: print the machine's real IPs
         # so the GUI operator knows what to put in the Connection settings.

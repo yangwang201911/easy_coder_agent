@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import WebSocket from "ws";
 import * as net from "node:net";
+import * as ssh2 from "ssh2";
 import { backendUrlFromLine } from "./backend-output";
 
 // Backend location: in dev the repo's backend/ dir + its venv python; in a
@@ -37,8 +38,10 @@ let reconnecting = false; // suppress "backend-exit" while switching connections
 let remoteReconnect = false; // auto-reconnect is active for the current remote connection
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectDelay = 1000; // ms, grows x2 up to 15s
-let tunnel: ChildProcess | null = null; // ssh -N -L child (ssh mode only)
+let tunnel: ssh2.Client | null = null; // ssh2 client (ssh mode only)
+let tunnelServer: net.Server | null = null; // local forward listener
 let tunnelPort = 0; // local port the tunnel forwards to the remote server
+const rememberedPasswords = new Map<string, string>(); // session cache (per target): avoid re-prompting on auto-reconnect
 
 // ------------------------------------------------------------- connection
 // mode "local"  = spawn the bundled backend on this machine (default, as before).
@@ -146,31 +149,47 @@ function freeLocalPort(): Promise<number> {
   });
 }
 
-// Start "ssh -N -L <localPort>:127.0.0.1:<remotePort> user@host" and resolve
-// once the local port accepts connections (the forward is up).
+// Ask the user for the ssh password in a native dialog. Returns null when the
+// user cancels. The password is only kept in memory for the app session.
+function promptPassword(target: string): Promise<string | null> {
+  const win = window && !window.isDestroyed() ? window : undefined;
+  return new Promise((resolve) => {
+    // inputType/inputPlaceholder exist in Electron >= 22; the bundled @types
+    // are older, hence the cast
+    dialog.showMessageBox(win!, {
+      type: "question",
+      title: "SSH password required",
+      message: `Connect to ${target}?`,
+      detail: "The server asked for a password. It is used only for this app session (not saved to disk).",
+      buttons: ["Cancel", "Connect"],
+      defaultId: 1,
+      cancelId: 0,
+      noLink: true,
+      inputType: "password",
+      inputPlaceholder: "password",
+    } as any).then((r: any) => resolve(r.response === 1 ? (r.inputText as string) : null));
+  });
+}
+
+// Open an ssh2 client with a local forward <localPort> -> 127.0.0.1:<remotePort>.
+// Resolves once the forward is established; rejects if auth fails, the user
+// cancels the password prompt, or the link cannot be established.
 async function startTunnel(t: SshTarget): Promise<number> {
   stopTunnel();
   const localPort = await freeLocalPort();
-  const args = [
-    "-N", // no remote command: tunnel only
-    "-o", "BatchMode=yes", // never prompt for a password (fail fast instead)
-    "-o", "ExitOnForwardFailure=yes", // die if the local forward cannot be set up
-    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", // detect dead links
-    "-o", "ConnectTimeout=10",
-    "-p", String(t.port || 22),
-    "-L", `${localPort}:127.0.0.1:${t.remotePort}`,
-    t.user ? `${t.user}@${t.host}` : t.host,
-  ];
-  if (t.identity) args.splice(1, 0, "-i", t.identity);
-  console.log("[main] starting ssh tunnel:", "ssh", args.join(" "));
-  const proc = spawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"] });
-  tunnel = proc;
-  proc.stdout?.on("data", (d: Buffer) => process.stdout.write(`[ssh] ${d.toString()}`));
-  proc.stderr?.on("data", (d: Buffer) => process.stderr.write(`[ssh] ${d.toString()}`));
-  proc.on("exit", (code) => {
-    if (tunnel !== proc) return; // superseded by a new tunnel / switch
+  const target = `${t.user ? t.user + "@" : ""}${t.host}`;
+  console.log(`[main] starting ssh tunnel: ${target}:${t.port || 22} forward ${localPort}->127.0.0.1:${t.remotePort}`);
+  const client = new ssh2.Client();
+  tunnel = client;
+  const done = new Promise<void>((resolve) => {
+    client.once("ready", () => resolve());
+    client.once("error", () => resolve()); // "close" follows; the error is reported below
+  });
+  client.on("close", () => {
+    if (tunnel !== client) return; // superseded by a new tunnel / switch
     tunnel = null;
-    console.log(`[main] ssh tunnel exited (code=${code})`);
+    stopTunnelServer();
+    console.log("[main] ssh tunnel closed");
     // the socket dies with the tunnel; its close event (remoteReconnect) will
     // restart the tunnel + ws. If the socket is already gone, trigger it here.
     if (remoteReconnect && !quitting) {
@@ -181,27 +200,116 @@ async function startTunnel(t: SshTarget): Promise<number> {
       }
     }
   });
-  // wait until the local forward accepts connections (or the tunnel dies)
-  const deadline = Date.now() + 15000;
-  for (;;) {
-    if (tunnel !== proc) throw new Error("ssh tunnel exited before it was ready");
-    const ok = await new Promise<boolean>((resolve) => {
-      const s = net.connect(localPort, "127.0.0.1");
-      s.once("connect", () => { s.destroy(); resolve(true); });
-      s.once("error", () => { s.destroy(); resolve(false); });
+  let authFailed: Error | null = null;
+  let prompted = false; // the password dialog opens at most once per tunnel
+  const tried = new Set<string>(); // methods already offered (avoid re-trying a rejected key)
+  client.on("error", (e) => { authFailed = authFailed ?? e; });
+  // ssh2's privateKey option takes the key content (PEM), not a file path
+  let identityPem: string | undefined;
+  if (t.identity) {
+    try { identityPem = fs.readFileSync(t.identity, "utf8"); }
+    catch (e: any) { throw new Error(`cannot read identity file ${t.identity}: ${e?.message ?? e}`); }
+  }
+  // ssh agent (if one is running): used when no identity file is set
+  const agent = !t.identity && process.env.SSH_AUTH_SOCK ? "SSH_AUTH_SOCK" : undefined;
+  // servers that offer only keyboard-interactive auth (no plain password):
+  // answer the prompts with the session-cached password, prompting the user if needed
+  client.on("keyboard-interactive", (_name, _instructions, _lang, prompts, finish) => {
+    const pw = rememberedPasswords.get(target) || "";
+    if (pw) { finish(prompts.map(() => pw)); return; }
+    promptPassword(target).then((p) => {
+      if (tunnel !== client) return; // superseded while the dialog was open
+      if (p) { rememberedPasswords.set(target, p); finish(prompts.map(() => p)); }
+      else { authFailed = authFailed ?? new Error("password prompt cancelled"); finish(prompts.map(() => "")); }
     });
-    if (ok) { tunnelPort = localPort; console.log("[main] ssh tunnel up on 127.0.0.1:" + localPort); return localPort; }
-    if (Date.now() > deadline) throw new Error("ssh tunnel did not come up within 15s (check host/user/identity, or that ssh allows TCP forwarding)");
-    await new Promise((r) => setTimeout(r, 250));
+  });
+  client.connect({
+    host: t.host,
+    port: t.port || 22,
+    username: t.user || undefined,
+    // ssh2 only allows methods present in the config: always register password
+    // (cached value, may be empty — the dialog fills it in) and keyboard, so
+    // the authHandler below can offer them
+    password: rememberedPasswords.get(target) || "",
+    tryKeyboard: true,
+    ...(identityPem ? { privateKey: identityPem } : {}),
+    ...(agent ? { agent } : {}),
+    readyTimeout: 120000, // generous: the password dialog may take a while
+    keepaliveInterval: 15000,
+    keepaliveCountMax: 3,
+    // auth order: identity file / ssh agent first, then password (with a GUI
+    // prompt), then keyboard-interactive. A failed method falls through to the
+    // next one automatically.
+    authHandler: (methodsLeft, _partial, nextRaw) => {
+      // ssh2 also accepts next(false) to stop the auth chain; the @types are
+      // narrower, hence the cast. methodsLeft is null on the first attempt:
+      // use our preferred order as the candidate list.
+      const next = nextRaw as (m: any) => void;
+      const left = methodsLeft ?? ["publickey", "agent", "password", "keyboard-interactive"];
+      if (left.includes("publickey") && identityPem && !tried.has("publickey")) { tried.add("publickey"); next("publickey"); return; }
+      if (left.includes("agent") && agent && !tried.has("agent")) { tried.add("agent"); next("agent"); return; }
+      if (left.includes("password")) {
+        const pw = rememberedPasswords.get(target) || "";
+        if (pw) { next({ type: "password", username: t.user || "", password: pw }); return; }
+        if (prompted) { next(false); return; } // rejected once: don't ask again
+        prompted = true;
+        // no cached password: ask the user in a dialog, then call next() with
+        // the result. next() is called asynchronously — ssh2 supports this.
+        promptPassword(target).then((p) => {
+          if (tunnel !== client) return; // superseded while the dialog was open
+          if (p) {
+            rememberedPasswords.set(target, p);
+            next({ type: "password", username: t.user || "", password: p });
+          } else {
+            authFailed = authFailed ?? new Error("password prompt cancelled");
+            next(false);
+          }
+        });
+        return; // next() will be called asynchronously
+      }
+      if (left.includes("keyboard-interactive")) { next("keyboard-interactive"); return; }
+      authFailed = authFailed ?? new Error(`no supported ssh auth method (server offers: ${left.join(", ") || "none"})`);
+      next(false);
+    },
+  });
+  await done;
+  if (tunnel !== client) { client.end(); throw new Error("ssh tunnel superseded"); }
+  if (authFailed) { stopTunnel(); throw authFailed; }
+  // forward: local connections -> remote 127.0.0.1:<remotePort>
+  const srv = net.createServer((sock) => {
+    client.forwardOut("127.0.0.1", 0, "127.0.0.1", t.remotePort, (err, stream) => {
+      if (err) { sock.destroy(); return; }
+      stream.on("error", () => sock.destroy());
+      sock.on("error", () => stream.end());
+      stream.pipe(sock);
+      sock.pipe(stream);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    srv.once("error", reject);
+    srv.listen(localPort, "127.0.0.1", () => resolve());
+  }).catch((e) => { stopTunnel(); throw e; });
+  tunnelServer = srv;
+  tunnelPort = localPort;
+  console.log("[main] ssh tunnel up on 127.0.0.1:" + localPort);
+  return localPort;
+}
+
+function stopTunnelServer() {
+  if (tunnelServer) {
+    const s = tunnelServer;
+    tunnelServer = null;
+    s.removeAllListeners();
+    s.close();
   }
 }
 
 function stopTunnel() {
+  stopTunnelServer();
   if (tunnel) {
     const old = tunnel;
     tunnel = null;
-    try { old.kill("SIGTERM"); } catch { /* ignore */ }
-    setTimeout(() => { try { old.kill("SIGKILL"); } catch { /* ignore */ } }, 2000);
+    try { old.end(); } catch { /* ignore */ }
   }
 }
 

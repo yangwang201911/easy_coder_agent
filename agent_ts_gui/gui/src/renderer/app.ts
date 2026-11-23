@@ -1806,7 +1806,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       `<div class="field"><span class="lbl">ssh host</span><input type="text" class="c-ssh-host" placeholder="remote machine"/></div>` +
       `<div class="field"><span class="lbl">ssh user</span><input type="text" class="c-ssh-user" placeholder="(blank = default user)"/></div>` +
       `<div class="field"><span class="lbl">ssh port</span><input type="number" class="c-ssh-port" placeholder="22"/></div>` +
-      `<div class="field"><span class="lbl">identity</span><input type="text" class="c-ssh-identity" placeholder="identity file (blank = ssh agent/config)"/></div>` +
+      `<div class="field"><span class="lbl">identity</span><input type="text" class="c-ssh-identity" placeholder="identity file (blank = ssh agent; password dialog if the server asks)"/></div>` +
       `<div class="field"><span class="lbl">server port</span><input type="number" class="c-ssh-rport" placeholder="coder-agent-server port on the remote machine"/></div>` +
       `</div>` +
       `<div class="field"><span class="lbl">token</span><input type="text" class="c-token" placeholder="shared secret (server started with --token)"/></div>` +

@@ -263,12 +263,10 @@ agent, so use a strong one.
 
 ### SSH tunnel (ssh mode, recommended)
 
-Like VS Code Remote-SSH: the GUI opens
-`ssh -N -L <local>:127.0.0.1:<server port> <user>@<host>` itself and connects
+Like VS Code Remote-SSH: the GUI opens an ssh tunnel
+(`-L <local>:127.0.0.1:<server port> <user>@<host>`) itself and connects
 through the local port. The server only listens on loopback, no port is
-exposed, no firewall changes, and authentication is your normal ssh key
-setup (including `ProxyJump` via `~/.ssh/config` aliases — the ssh host field
-accepts anything `ssh` accepts).
+exposed, and no firewall changes are needed.
 
 On the server machine:
 
@@ -277,13 +275,16 @@ python -m coder_agent.server --host 127.0.0.1 --port 8931 --root /path/to/projec
 ```
 
 In the GUI set mode **ssh**, fill ssh host/user (blank = default), ssh port
-(blank = 22), identity file (blank = ssh agent/config), and the server port.
-Key-based ssh is required (password prompts are not supported; the tunnel
-fails fast instead). If the tunnel drops, the GUI reconnects automatically
-(restarts the tunnel + the socket, same backoff as remote mode).
+(blank = 22), identity file (blank = ssh agent), and the server port.
+Authentication order: ssh-agent / identity file first, then password — if the
+server asks for a password, the GUI pops a dialog to enter it. The password is
+kept in memory for the app session only (so auto-reconnects don't re-prompt)
+and is never written to disk. If the tunnel drops, the GUI reconnects
+automatically (restarts the tunnel + the socket, same backoff as remote mode).
 
-Windows ships OpenSSH (`ssh.exe`) since Windows 10, so ssh mode works out of
-the box. Closing the GUI never cancels a running turn on the server.
+Note: the tunnel is implemented in-process (ssh2), so `~/.ssh/config` aliases
+and `ProxyJump` are not supported — enter the host and port directly.
+Closing the GUI never cancels a running turn on the server.
 
 ## Notes
 

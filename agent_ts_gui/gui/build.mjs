@@ -10,7 +10,7 @@ await build({
   platform: "node",
   format: "cjs",
   target: "node20",
-  external: ["electron"],
+  external: ["electron", "ssh2"], // ssh2 ships native .node bindings: keep it in node_modules
 });
 
 // renderer: copy static assets, then bundle app.ts over them
