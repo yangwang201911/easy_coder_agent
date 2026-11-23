@@ -21,9 +21,10 @@ Split the user's goal into at most {max_subtasks} subtasks. Rules:
 - Use "depends_on" for ordering. Subtasks with no dependency between them may run in parallel, so subtasks that edit the SAME file must depend on each other.
 - "files" lists the paths or module directories the subtask touches or needs to read (used to load the right module docs).
 - "task_type" is one of: {types}.
+- "parallel_safe" is true unless the subtask must NOT run at the same time as others (e.g. it builds the whole project, edits a shared config, or depends on a file another subtask creates). Default true.
 - A simple goal may need only 1-2 subtasks. Do not invent extra work.
 Answer with ONLY a JSON object, no prose:
-{{"subtasks": [{{"id": "T1", "title": "short title", "goal": "precise instruction for the subtask", "depends_on": [], "task_type": "cpp_impl", "files": ["src/foo.cpp"]}}]}}"""
+{{"subtasks": [{{"id": "T1", "title": "short title", "goal": "precise instruction for the subtask", "depends_on": [], "task_type": "cpp_impl", "files": ["src/foo.cpp"], "parallel_safe": true}}]}}"""
 
 
 def extract_json(text: str) -> dict:

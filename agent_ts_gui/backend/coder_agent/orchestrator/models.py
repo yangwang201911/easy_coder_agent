@@ -18,6 +18,7 @@ class SubTask:
     depends_on: list[str] = field(default_factory=list)
     task_type: str = "general"
     files: list[str] = field(default_factory=list)  # path / module hints (used for docs + conflict avoidance)
+    parallel_safe: bool = True  # False = the planner says it must not run alongside other subtasks
     status: str = "pending"  # pending | running | done | failed | skipped | cancelled
     summary: str = ""
     steps: int = 0
@@ -42,6 +43,7 @@ class SubTask:
             depends_on=[str(x) for x in deps],
             task_type=str(d.get("task_type") or default_type),
             files=[str(x) for x in files],
+            parallel_safe=bool(d.get("parallel_safe", True)),
         )
 
 
