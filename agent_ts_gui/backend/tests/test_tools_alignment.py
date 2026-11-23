@@ -145,6 +145,23 @@ def test_search_unconfigured_raises(ctx, monkeypatch):
         web.web_search(ctx, {"query": "x"})
 
 
+def test_strip_old_images():
+    from coder_agent.context.compression import strip_old_images
+
+    img = lambda tag: [{"type": "text", "text": tag}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAA"}}]
+    msgs = [{"role": "user", "content": "old shot"},
+            {"role": "user", "content": img("one")},
+            {"role": "user", "content": "plain"},
+            {"role": "user", "content": img("two")}]
+    out = strip_old_images(msgs, keep_last=1)
+    assert out[0]["content"] == "old shot" and out[2]["content"] == "plain"
+    assert out[1]["content"][1]["type"] == "text" and "removed" in out[1]["content"][1]["text"]
+    assert out[3]["content"][1]["type"] == "image_url"  # newest image kept
+    out = strip_old_images(msgs, keep_last=0)
+    assert all(p["type"] == "text" for m in out for p in m["content"] if isinstance(p, dict) and ("type" in p))
+    assert strip_old_images([{"role": "user", "content": "x"}]) == [{"role": "user", "content": "x"}]
+
+
 def test_grep_search_with_context(tmp_path):
     from coder_agent.tools import fs
 

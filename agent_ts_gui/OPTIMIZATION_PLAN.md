@@ -11,7 +11,7 @@
 | 2 | todo / 任务清单工具 | 高 | ✅ | `tools/interact.py` + 主循环注入 |
 | 3 | LLM 调用重试 + 指数退避 | 高 | ✅ | `llm/openai_compat.py` |
 | 4 | grep_search 换 ripgrep + 上下文行 | 高 | ✅ | `tools/fs.py` |
-| 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ⬜ | `context/compression.py` |
+| 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ✅ | `context/compression.py` |
 | 6 | 浏览器多 tab | 中 | ⬜ | `tools/browser.py` |
 | 7 | 记忆自动沉淀（turn-end 提取） | 中 | ⬜ | `knowledge.py` |
 | 8 | 系统提示注入动态环境信息 | 中 | ⬜ | `prompts/builder.py` |
@@ -54,10 +54,12 @@
   新增 `context_lines` 参数（0-10）。
 - **验证**：`test_grep_search_with_context`（本机无 rg，覆盖 fallback 路径）。
 
-### 5. 上下文压缩增强 ⬜
+### 5. 上下文压缩增强 ✅
 - **问题**：只有全量 LLM 摘要一种粒度；历史里的 screenshot data_url 是 token 大户。
-- **方案**：摘要前先做 micro-compaction（只截断旧的、大的 tool result）；
-  压缩时优先剔除历史图片（保留最近一张）。
+- **实现**：micro-compaction（旧 tool output 截断到 600 字符）原本已有；
+  新增 `strip_old_images`（旧消息图片替换为 `[image removed to save context]`，
+  保留最近 1 张），接入 `SummarizeStrategy` 全部三个 step。
+- **验证**：`test_strip_old_images`；backend 23 passed。
 
 ### 6. 浏览器多 tab ⬜
 - **问题**：全局单 `_page`，无法同时看两个页面。
@@ -99,4 +101,6 @@
   验证：backend 21 passed，GUI 冒烟全绿（proj_switch/ctxmenu 为存量失败）。
   已提交 6e41f58。
 - 2026-11-23：#4（grep 换 ripgrep + context_lines）完成。
-  验证：backend 22 passed。
+  验证：backend 22 passed。已提交 b0b0c59。
+- 2026-11-23：#5（压缩时清理旧图片，保留最近 1 张）完成。
+  验证：backend 23 passed。
