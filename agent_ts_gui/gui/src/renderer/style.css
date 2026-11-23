@@ -156,30 +156,6 @@ body {
 #titlebar button svg { display: block; }
 #win-close:hover { background: var(--error); color: #fff; }
 
-/* ------------------------------------------------------------- toolbar */
-#toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 10px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-#toolbar label { display: flex; align-items: center; gap: 4px; }
-#root-label { font-weight: bold; white-space: nowrap; }
-#remote-label {
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--accent);
-  background: var(--hover);
-  border: 1px solid var(--accent);
-  border-radius: 3px;
-  padding: 1px 8px;
-  cursor: pointer;
-}
-#remote-label:hover { background: var(--hover-strong); }
-.sep { width: 1px; height: 20px; background: var(--border); }
 select, button, textarea, input {
   font-family: inherit;
   font-size: 13px;
@@ -254,26 +230,44 @@ body.resizing-h * { cursor: row-resize !important; }
 .tabpage { flex: 1; min-height: 0; overflow-y: auto; }
 .hidden { display: none !important; }
 
-/* left panel: vertical tab strip (VS Code style) + pages */
-#left-tabs {
+/* left panel: narrow icon rail (VS Code activity-bar style) + pages */
+#left-rail {
   flex: none;
+  width: 40px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px 6px;
-  border-bottom: 1px solid var(--border);
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0;
+  border-right: 1px solid var(--border);
 }
-#left-tabs .tab {
+#left-rail .tab {
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 5px 10px;
+  border-radius: 6px;
   margin: 0;
-  text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
 }
-#left-tabs .tab.active { border-color: var(--border); background: var(--hover); }
+#left-rail .tab:hover { color: var(--text); }
+#left-rail .tab.active { border-color: var(--border); background: var(--hover); color: var(--text); }
+#left-rail #rail-settings { margin-top: auto; }
+#rail-project-menu {
+  width: 32px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+}
+#rail-project-menu:hover { background: var(--hover-strong); color: var(--text); }
 #left-pages { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #left-pages .tabpage { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 #left-pages .tabpage.hidden { display: none !important; }
@@ -384,6 +378,14 @@ body.term-maximized #mid, body.term-maximized #split-bottom { display: none; }
 }
 #term-pane .xterm { position: absolute; inset: 4px; }
 #term-pane .xterm .xterm-viewport { overflow-anchor: auto; }
+/* xterm's hidden screen-reader mirror (.xterm-accessibility-tree) is
+   user-selectable; xterm.css only clears the ::selection color, so the
+   browser paints its default highlight over the terminal when a selection
+   range overlaps it. Suppress it here. */
+#term-pane .xterm .xterm-accessibility-tree { user-select: none; -webkit-user-select: none; }
+#term-pane .xterm .xterm-accessibility-tree *::selection {
+  color: transparent; background-color: transparent;
+}
 
 /* --------------------------------------------------------------- chat
    Claude-Code style: the pane is a flat dark area; the user prompt sits in a
@@ -503,16 +505,15 @@ body.term-maximized #mid, body.term-maximized #split-bottom { display: none; }
 #send-row button:hover { background: var(--hover-strong); color: var(--text); }
 #send-row button svg { display: block; }
 #model-combo { font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* thinking effort chip next to the model chip (VS Code style) */
-#effort-combo {
-  font-size: 11px; padding: 3px 6px; border-radius: 6px;
-  border: 1px solid var(--border); background: transparent; color: var(--text);
-}
-/* the send arrow: filled circle when active, gray when disabled */
-#send-btn { width: 28px; height: 28px; padding: 0; justify-content: center; }
+/* thinking effort chip next to the model chip (plain text, like the model chip) */
+#effort-combo { font-size: 11px; }
+/* the send arrow: filled circle when active, gray when disabled; same height as the text chips */
+#send-btn { width: 22px; height: 22px; padding: 0; justify-content: center; }
 #send-btn:not(:disabled) { background: var(--text); color: var(--bg); }
 #send-btn:not(:disabled):hover { background: var(--text); color: var(--bg); opacity: 0.85; }
 #send-btn:disabled { background: var(--badge-bg); color: var(--text-faint); }
+#send-btn.stopping { background: #b3543f; color: #fff; }
+#send-btn.stopping:hover { background: #c25f48; }
 /* status row under the card: connection mode + approval policy */
 #input-foot-row {
   flex: none;

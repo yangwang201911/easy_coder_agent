@@ -29,7 +29,7 @@ function check(label, ok) {
   check("project opened on boot", opened);
 
   // 1) Projects dialog opens with the expected buttons
-  await evalJs("document.getElementById('root-label').click()");
+  await evalJs("document.getElementById('rail-project-menu').click()");
   await wait(300);
   const dlg = await evalJs(`JSON.stringify({
     show: !!document.querySelector('#modal-backdrop.show'),
@@ -51,7 +51,7 @@ function check(label, ok) {
   await wait(200);
   const add = await evalJs(`(async () => {
     window.__pickDirectory = () => Promise.resolve("/tmp");
-    document.getElementById('root-label').click();
+    document.getElementById('rail-project-menu').click();
     await new Promise(r => setTimeout(r, 200));
     document.querySelector('#modal .add-project').click();
     await new Promise(r => setTimeout(r, 500));

@@ -14,7 +14,7 @@ let cdp;
   let ready = false;
   while (Date.now() < deadline) {
     if (!clicked) clicked = await cdp.evalJs(`(() => {
-      const button = document.getElementById('settings-btn');
+      const button = document.getElementById('rail-settings');
       if (!button) return false;
       button.click(); return true;
     })()`);

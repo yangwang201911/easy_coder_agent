@@ -296,18 +296,15 @@ async function refreshServerInfo() {
 }
 
 // ------------------------------------------------------------------ toolbar
+const SEND_ICON = '<svg width="12" height="12" viewBox="0 0 16 16" style="display:block"><path d="M8 13 V3 M3.5 7.5 L8 3 L12.5 7.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const STOP_ICON = '<svg width="12" height="12" viewBox="0 0 16 16" style="display:block"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="5.4" y="5.4" width="5.2" height="5.2" rx="1" fill="currentColor"/></svg>';
+
 function setBusy(busy: boolean) {
   S.busy = busy;
-  ($("stop-btn") as HTMLButtonElement).disabled = !busy;
   const sb = $("send-btn") as HTMLButtonElement;
-  // while the current session is running, Send stays enabled: sending queues the
-  // message as a "steer" - the agent picks it up at the next safe point (right
-  // away if it is between model calls, after the current stream is aborted if it
-  // is mid-reply, after the running command finishes if it is executing one)
-  sb.disabled = false;
-  sb.title = busy
-    ? "Send (Enter): queues your message; the agent picks it up at the next safe point"
-    : "Send (Enter)";
+  sb.classList.toggle("stopping", busy);
+  sb.innerHTML = busy ? STOP_ICON : SEND_ICON;
+  sb.title = busy ? "Stop the running turn" : "Send (Enter)";
 }
 
 // the task type is chosen in the input toolbar's ＋ menu (not a toolbar select)
@@ -323,6 +320,13 @@ function refreshModelLabel() {
   el.title = model
     ? `Model: ${model}\nContext: ${fmtTok(S.ctxMax)} tokens\nClick to open Settings > Model`
     : "No model configured (Settings > Model)";
+}
+
+// thinking-effort chip in the input toolbar: plain text, click for the options
+function refreshEffortLabel() {
+  const el = $("effort-combo-label");
+  el.textContent = S.effort;
+  ($("effort-combo") as HTMLButtonElement).title = `Thinking effort: ${S.effort} (click to change)`;
 }
 
 // connection chip under the input card: "Local" / "Remote host:port"
@@ -392,9 +396,9 @@ async function openProject(root: string, sessionId: string | null = null) {
   setLastProjectName(saved.name);
   // the open project's path lives in the title bar, not on the Project button
   $("titlebar-name").textContent = `Coder Agent: ${r.root}`;
-  $("root-label").title = `${saved ? saved.name + " (" + saved.mode + ")\n" : ""}${r.root}`;
+  ($("rail-project") as HTMLElement).title = `Project: ${saved ? saved.name + " (" + saved.mode + ")\n" : ""}${r.root}\nClick to show the turns of this project`;
   document.title = `Coder Agent: ${r.root}`;
-  ($("effort-combo") as HTMLSelectElement).value = S.effort;
+  refreshEffortLabel();
   // the last-project record is only meaningful for local paths; in remote mode
   // the project lives on the server machine (remembered by name in localStorage)
   window.api.getConnMode().then((m) => { if (m === "local") window.api.setLastProject(r.root); }).catch(() => {});
@@ -1768,7 +1772,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
     // ---- prompts tab
     const pPage = modal.querySelector<HTMLElement>('.page[data-p="prompts"]')!;
     pPage.innerHTML =
-      `<div class="toprow"><select class="ptype"></select><button class="pnew">New type...</button><button class="prevert">Revert to default</button></div>` +
+      `<div class="toprow"><select class="ptype"></select><button class="pnew">New type...</button><button class="prevert">Revert to default</button><button class="pview" title="Show the full system prompt that will be sent for this task type">View system prompt</button></div>` +
       `<textarea class="code"></textarea>` +
       `<div class="tip" style="font-size:11px;color:var(--text-soft2);margin-top:6px">Front-matter keys: name, description, keywords, globs, effort, tools. Saved to the user prompts folder; a project can override in &lt;project&gt;/.agent/prompts/.</div>`;
     const pType = pPage.querySelector(".ptype") as HTMLSelectElement;
@@ -1805,6 +1809,22 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       dirtyPrompts.delete(pCurrent);
       await call("revert_prompt", { name: pCurrent });
       pEdit.value = await pText(pCurrent);
+    });
+    // read-only view of the full system prompt that will be sent for the
+    // selected task type (replaces the old toolbar "System prompt" button)
+    pPage.querySelector(".pview")!.addEventListener("click", async () => {
+      const taskType = pCurrent ?? "general";
+      const r = await call("system_prompt", { task_type: taskType });
+      if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
+      const bd = document.createElement("div");
+      bd.className = "modal-backdrop stacked show";
+      bd.innerHTML =
+        `<div class="modal wide"><div class="head">System prompt (${esc(taskType)})</div>` +
+        `<div class="body"><pre class="diff" style="max-height:60vh"></pre></div>` +
+        `<div class="foot"><button class="primary yes">Close</button></div></div>`;
+      bd.querySelector("pre")!.textContent = r.text;
+      document.body.appendChild(bd);
+      bd.querySelector(".yes")!.addEventListener("click", () => bd.remove());
     });
     void pLoad();
 
@@ -2177,7 +2197,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
         S.ctxMax = S.config.context?.max_tokens ?? S.ctxMax;
         S.compressThreshold = S.config.context?.compress_threshold ?? 0.95;
         S.compressTarget = S.config.context?.compress_target ?? 0.5;
-        ($("effort-combo") as HTMLSelectElement).value = S.effort;
+        refreshEffortLabel();
         reloadTaskTypes();
         refreshModelLabel();
         refreshApprovalLabel();
@@ -2611,7 +2631,7 @@ function bindTabs(barId: string, pagesId: string, pagePrefix: string) {
     });
   });
 }
-bindTabs("left-tabs", "left-pages", "tab-");
+bindTabs("left-rail", "left-pages", "tab-");
 bindTabs("right-tabs", "bottom", "tab-");
 // show the terminal action buttons (＋ / maximize / hide) only while the
 // Terminals tab is active
@@ -2645,7 +2665,7 @@ $("web-open-btn").addEventListener("click", webUrlSubmit);
 });
 
 function switchLeftTab(name: string) {
-  const btn = document.querySelector(`#left-tabs .tab[data-tab="${name}"]`) as HTMLElement;
+  const btn = document.querySelector(`#left-rail .tab[data-tab="${name}"]`) as HTMLElement;
   btn?.click();
 }
 
@@ -3055,7 +3075,15 @@ Object.defineProperty(window, "__root", { get: () => S.root });
 };
 
 // ------------------------------------------------------------------ wiring
-$("send-btn").addEventListener("click", () => { void send(); });
+$("send-btn").addEventListener("click", () => {
+  if (S.busy) {
+    // the send button is the stop button while a turn is running
+    call("cancel");
+    chat.line("\n[stopping...]", "c-warn");
+    return;
+  }
+  void send();
+});
 $("input").addEventListener("keydown", (e) => {
   if (e.code === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
@@ -3069,10 +3097,6 @@ $("input").addEventListener("keydown", (e) => {
   if (e.isComposing || e.keyCode === 229) return;
   if (e.code === "Enter") { e.preventDefault(); send(); }
 });
-$("stop-btn").addEventListener("click", () => {
-  call("cancel");
-  chat.line("\n[stopping...]", "c-warn");
-});
 // mode button in the input toolbar: Agent / Plan & subtasks (was the toolbar select)
 $("mode-combo-btn").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -3082,8 +3106,14 @@ $("mode-combo-btn").addEventListener("click", (e) => {
     { label: "Plan & subtasks (review the plan, confirm each stage)", fn: () => { S.mode = 1; } },
   ]);
 });
-$("effort-combo").addEventListener("change", (e) => {
-  S.effort = (e.target as HTMLSelectElement).value;
+$("effort-combo").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  showMenu(rect.left, rect.bottom + 4,
+    ["default", "none", "low", "medium", "high"].map((v) => ({
+      label: v + (v === S.effort ? "  ✓" : ""),
+      fn: () => { S.effort = v; refreshEffortLabel(); },
+    })));
 });
 // model chip -> Settings > Model
 $("model-combo").addEventListener("click", () => {
@@ -3140,52 +3170,15 @@ $("win-max").addEventListener("click", async () => {
   setMaxIcon(await window.api.winToggleMaximize());
 });
 
-$("settings-btn").addEventListener("click", () => {
+// left rail: gear -> Settings dialog; the project icon opens the projects
+// dialog in addition to switching to the Turns page (see bindTabs)
+$("rail-settings").addEventListener("click", () => {
   if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
   void settingsDialog().then((saved) => { if (saved) chat.line("\n[settings saved]", "c-ok"); });
 });
-
-// ------------------------------------------------ remote server indicator
-// shown in the toolbar next to the project label while connected to a remote
-// agent server; clicking it opens Settings > Remote server
-async function refreshRemoteLabel() {
-  const el = $("remote-label");
-  const mode = await window.api.getConnMode().catch(() => "local");
-  if (mode !== "remote" && mode !== "ssh") { el.classList.add("hidden"); el.textContent = ""; return; }
-  const c = await window.api.getConnection().catch(() => null);
-  if (!c) { el.classList.add("hidden"); return; }
-  const text = mode === "ssh" && c.ssh
-    ? `ssh: ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host}`
-    : `remote: ${c.host}:${c.port}`;
-  el.textContent = text;
-  el.title = mode === "ssh" && c.ssh
-    ? `Connected via ssh tunnel to ${c.ssh.user ? c.ssh.user + "@" : ""}${c.ssh.host} (server port ${c.ssh.remotePort})\nClick to change the connection.`
-    : `Connected to remote agent server ${c.host}:${c.port}${c.token ? " (token set)" : ""}\nClick to change the connection.`;
-  el.classList.remove("hidden");
-}
-$("remote-label").addEventListener("click", () => {
-  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
-  void settingsDialog("connection").then((saved) => { if (saved) chat.line("\n[settings saved]", "c-ok"); });
-});
-void refreshRemoteLabel();
 void refreshConnLabel();
 refreshModelLabel();
 refreshApprovalLabel();
-$("sp-btn").addEventListener("click", async () => {
-  const taskType = S.curTaskType ?? "general";
-  const r = await call("system_prompt", { task_type: taskType });
-  if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
-  // read-only modal
-  const modal = $("modal");
-  modal.className = "modal wide";
-  modal.innerHTML =
-    `<div class="head">System prompt (${esc(taskType)})</div>` +
-    `<div class="body"><pre class="diff" style="max-height:60vh"></pre></div>` +
-    `<div class="foot"><button class="primary yes">Close</button></div>`;
-  modal.querySelector("pre")!.textContent = r.text;
-  $("modal-backdrop").classList.add("show");
-  modal.querySelector(".yes")!.addEventListener("click", () => $("modal-backdrop").classList.remove("show"));
-});
 
 // ------------------------------------------------------------- projects
 // Saved projects are remembered by name (localStorage): {name, mode, path}.
@@ -3461,14 +3454,10 @@ async function projectsDialog(): Promise<void> {
   $("modal-backdrop").classList.add("show");
 }
 
-async function chooseProject() {
+$("rail-project-menu").addEventListener("click", () => {
   if (S.busy) return;
   void projectsDialog();
-}
-
-$("root-label").style.cursor = "pointer";
-$("root-label").title = "Click to switch / manage projects";
-$("root-label").addEventListener("click", chooseProject);
+});
 
 // ------------------------------------------------------- resizable splitters
 const SPLIT_DEFAULTS = { left: 260, bottom: 240 };

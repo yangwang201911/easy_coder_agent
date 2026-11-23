@@ -102,7 +102,7 @@ function check(label, ok) {
       if (t.includes("Coder Agent:")) { opened = true; break; }
       // open it through the projects dialog (the app's openProjectNamed path)
       await evalJs(`(async () => {
-        document.getElementById('root-label').click();
+        document.getElementById('rail-project-menu').click();
         await new Promise(r => setTimeout(r, 400));
         const row = document.querySelector('#modal .projrow');
         if (row) row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
@@ -111,17 +111,17 @@ function check(label, ok) {
     }
     check("project open over remote (for the switch test)", opened);
 
-    // remote label visible in the toolbar (refreshRemoteLabel is async: poll)
+    // connection chip in the input footer shows the remote target (refreshConnLabel is async: poll)
     let label = "";
     for (let i = 0; i < 20; i++) {
-      label = String(await evalJs("document.getElementById('remote-label') && document.getElementById('remote-label').textContent"));
-      if (label.includes(`remote: 127.0.0.1:${PORT}`)) break;
+      label = String(await evalJs("document.getElementById('conn-mode-text') && document.getElementById('conn-mode-text').textContent"));
+      if (label.includes(`Remote 127.0.0.1:${PORT}`)) break;
       await wait(250);
     }
-    check("remote label visible", label.includes(`remote: 127.0.0.1:${PORT}`));
+    check("remote label visible", label.includes(`Remote 127.0.0.1:${PORT}`));
 
     // settings > model tab: server fields editable, Save works and persists
-    await evalJs("document.getElementById('settings-btn').click()");
+    await evalJs("document.getElementById('rail-settings').click()");
     await wait(800);
     const modelInput = await evalJs(`(() => {
       const i = document.querySelector('#modal [data-s="server"][data-k="model"]');
@@ -134,7 +134,7 @@ function check(label, ok) {
     const savedMsg = String(await evalJs("document.getElementById('chat').textContent"));
     check("settings saved", savedMsg.includes("settings saved"));
     const savedVal = await evalJs(`(() => {
-      document.getElementById('settings-btn').click();
+      document.getElementById('rail-settings').click();
       return new Promise(r => setTimeout(() => {
         const i = document.querySelector('#modal [data-s="server"][data-k="model"]');
         r(i ? i.value : null);
@@ -146,7 +146,7 @@ function check(label, ok) {
 
     // switch to local and Apply: local backend spawned + ws connected,
     // project reopened, no RPC errors, dialog closes
-    await evalJs("document.getElementById('settings-btn').click()");
+    await evalJs("document.getElementById('rail-settings').click()");
     await wait(500);
     await evalJs("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()");
     await wait(500);
@@ -181,11 +181,11 @@ function check(label, ok) {
     check("project reopened after switch to local", reopened);
     const chatText = String(await evalJs("document.getElementById('chat').textContent"));
     check("no 'backend not connected' in chat", !chatText.includes("backend not connected"));
-    const hidden = await evalJs("document.getElementById('remote-label').classList.contains('hidden')");
-    check("remote label hidden in local mode", hidden);
+    const localLabel = String(await evalJs("document.getElementById('conn-mode-text').textContent"));
+    check("connection chip shows Local in local mode", localLabel === "Local");
 
     // switch back to remote: reconnects to the standalone server
-    await evalJs("document.getElementById('settings-btn').click()");
+    await evalJs("document.getElementById('rail-settings').click()");
     await wait(500);
     await evalJs("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()");
     await wait(500);
@@ -193,8 +193,8 @@ function check(label, ok) {
     await evalJs("document.querySelector('#modal .c-apply').click()");
     let back = false;
     for (let i = 0; i < 40; i++) {
-      const l = String(await evalJs("document.getElementById('remote-label') && document.getElementById('remote-label').textContent"));
-      if (l.includes(`remote: 127.0.0.1:${PORT}`)) { back = true; break; }
+      const l = String(await evalJs("document.getElementById('conn-mode-text').textContent"));
+      if (l.includes(`Remote 127.0.0.1:${PORT}`)) { back = true; break; }
       await wait(500);
     }
     check("switch back to remote: reconnected + label shown", back);

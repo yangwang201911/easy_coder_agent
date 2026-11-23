@@ -37,7 +37,7 @@ function check(label, ok) {
   // window.api is a contextBridge proxy: assigning to it silently fails, so the
   // app exposes a __pickDirectory test hook (see window.__onEvent).
   await evalJs(`window.__pickDirectory = () => Promise.resolve(${JSON.stringify(ROOT_B)})`);
-  await evalJs("document.getElementById('root-label').click()");
+  await evalJs("document.getElementById('rail-project-menu').click()");
   await wait(300);
   await evalJs("document.querySelector('#modal .add-project').click()");
   await wait(300);

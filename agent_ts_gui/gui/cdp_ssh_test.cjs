@@ -79,7 +79,7 @@ async function noTarget(port, title, ms) {
       await wait(250);
     }
     const openConn = async () => {
-      await ev("document.getElementById('settings-btn').click()"); await wait(400);
+      await ev("document.getElementById('rail-settings').click()"); await wait(400);
       await ev("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()"); await wait(400);
     };
     const apply = (mode) => ev(`(() => { const m = document.querySelector('#modal .c-mode'); m.value = '${mode}'; m.dispatchEvent(new Event('change'));
@@ -120,7 +120,7 @@ async function noTarget(port, title, ms) {
     for (let i = 0; i < 60 && !ok; i++) { ok = /Connected to ws:\/\/127\.0\.0\.1/.test(await msg()) || !(await ev("!!document.querySelector('#modal .c-apply')")); await wait(250); }
     check("connected through the tunnel", ok);
     await wait(800);
-    check("remote label shows the ssh target", String(await ev("document.getElementById('remote-label').textContent")).includes(`u@127.0.0.1:${sshPort}`) || String(await ev("document.getElementById('remote-label').textContent")).includes("u@127.0.0.1"));
+    check("connection chip shows the ssh target", String(await ev("document.getElementById('conn-mode-text').textContent")).includes("SSH u@127.0.0.1"));
 
     // C) RPC through ssh tunnel to the real server (token handshake included)
     const reply = await ev(`new Promise((res) => { window.api.onReply((m) => { if (m.id === 777) res(JSON.stringify(m).slice(0, 200)); });

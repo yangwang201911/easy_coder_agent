@@ -57,7 +57,7 @@ function check(label, ok) {
     check("project opened via remote server", opened);
 
     // 3) connection tab shows remote mode
-    await evalJs("document.getElementById('settings-btn').click()");
+    await evalJs("document.getElementById('rail-settings').click()");
     await wait(300);
     await evalJs("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()");
     await wait(500);
@@ -76,7 +76,7 @@ function check(label, ok) {
     // name prompt.
     const ls = await evalJs(`(async () => {
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-      document.getElementById('root-label').click();
+      document.getElementById('rail-project-menu').click();
       await sleep(300);
       document.querySelector('#modal .add-project').click();
       await sleep(400);

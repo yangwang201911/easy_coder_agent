@@ -33,7 +33,7 @@ const check = (name, ok, extra = "") => {
   check("project opened", opened);
 
   // open the file from the tree
-  await evalJs(`document.querySelector('#left-tabs .tab[data-tab="files"]').click()`);
+  await evalJs(`document.querySelector('#left-rail .tab[data-tab="files"]').click()`);
   await wait(300);
   await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).find(e => e.textContent.includes('manage_ollma_mtp.sh')).click()`);
 

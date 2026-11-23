@@ -26,7 +26,7 @@ const app = spawnApp({ root: PROJ_A, onLog: (d) => process.stdout.write(`[app] $
   // open projects dialog, click add-local, then check if the renderer is
   // blocked (native dialog open) by probing with a short-timeout eval
   await evalJs(`localStorage.setItem("coder-agent.projects", JSON.stringify([]))`);
-  await evalJs("document.getElementById('root-label').click()");
+  await evalJs("document.getElementById('rail-project-menu').click()");
   await wait(300);
 
   const click = await evalJs(`document.querySelector('#modal .add-project').click(); "clicked"`, 8000);
