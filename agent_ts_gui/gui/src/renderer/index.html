@@ -130,11 +130,12 @@
         <button class="tab" data-tab="plan">Plan</button>
         <button class="tab" data-tab="thinking">Thinking</button>
         <button class="tab" data-tab="commands">Commands</button>
-        <button class="tab" data-tab="docs">Docs read</button>
         <button class="tab" data-tab="terminals">Terminals</button>
         <span class="flex1"></span>
         <span id="term-actions" class="hidden">
           <button id="term-new-btn" title="New terminal">＋</button>
+        </span>
+        <span id="term-panel-actions">
           <button id="term-max-btn" title="Maximize / restore the main display area">
             <svg width="12" height="12" viewBox="0 0 16 16" style="display:block"><rect x="2.5" y="2.5" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
           </button>
@@ -145,7 +146,6 @@
       <div id="tab-plan" class="tabpage hidden"></div>
       <div id="tab-thinking" class="tabpage log hidden"></div>
       <div id="tab-commands" class="tabpage log mono hidden"></div>
-      <div id="tab-docs" class="tabpage log mono hidden"></div>
       <div id="tab-terminals" class="tabpage hidden">
         <div id="term-pane"></div>
         <div id="term-list-col">

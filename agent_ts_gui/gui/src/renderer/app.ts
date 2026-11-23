@@ -136,7 +136,6 @@ const chat = new Pane($("chat"));
 const activity = new Pane($("tab-activity"));
 const thinking = new Pane($("tab-thinking"));
 const commands = new Pane($("tab-commands"));
-const docs = new Pane($("tab-docs"));
 const planView = $("tab-plan");
 
 // ------------------------------------------------------------------- state
@@ -168,7 +167,6 @@ const S = {
   sessionApprove: false, // "allow all in this session" is active (reset on new session / project)
   attachments: [] as { name: string; data_url: string }[],
   fileAttached: null as string | null,
-  pendingDocs: new Map<string, string>(),
   toolPaths: new Map<string, string>(), // tool_call id -> file path (for clickable results)
   planDict: null as Record<string, any> | null,
   todos: [] as { content: string; status: string }[], // update_todo checklist (collapsible panel above the input)
@@ -426,10 +424,9 @@ async function openProject(root: string, sessionId: string | null = null) {
 }
 
 function resetViews() {
-  chat.clear(); activity.clear(); thinking.clear(); docs.clear();
+  chat.clear(); activity.clear(); thinking.clear();
   planView.innerHTML = "";
   S.planDict = null;
-  S.pendingDocs.clear();
   renderTodos();
   S.block = null;
   S.mdBlock = null;
@@ -2402,21 +2399,11 @@ function onEvent(ev: AgentEvent) {
     log(ev, `${d.name} ${argsSummary(d.name, d.args ?? {})}`, "c-tool");
     const p = String((d.args ?? {}).path ?? "");
     if (p) S.toolPaths.set(d.id ?? "", p);
-    if (d.name === "read_file" && p.toLowerCase().endsWith(".md")) S.pendingDocs.set(d.id ?? "", p);
   } else if (k === "tool_result") {
     const tp = S.toolPaths.get(d.id ?? "") ?? "";
     S.toolPaths.delete(d.id ?? "");
     chatResult(!!d.ok, d.text ?? "", d.name ?? "", tp);
     log(ev, (d.ok ? "ok " : "FAILED ") + (d.text ?? ""), d.ok ? "" : "c-error");
-    const doc = S.pendingDocs.get(d.id ?? "");
-    if (doc) {
-      S.pendingDocs.delete(d.id ?? "");
-      if (d.ok) {
-        docs.line(`=== ${doc} ===`, "", true);
-        docs.line(String(d.text ?? "").slice(0, 4000), "", true);
-        docs.line();
-      }
-    }
   } else if (k === "command_output") {
     commands.write(d.text ?? "", "", true);
   } else if (k === "terminal_output" || k === "terminal_exited") {
@@ -2484,9 +2471,6 @@ function onEvent(ev: AgentEvent) {
       S.block = null;
     }
   } else if (k === "doc_analysis") {
-    docs.line(`=== ${d.subtask}: ${(d.docs ?? []).join(", ")}  (${d.source}) ===`, "b", true);
-    docs.line(d.summary || "(empty)", "", true);
-    docs.line();
     log(ev, `${d.subtask} read ${(d.docs ?? []).join(", ")} (${d.source})`);
   } else if (k === "session_rewound") {
     void (async () => {
@@ -2794,11 +2778,11 @@ function createTermX(id: string, ready: boolean) {
   return x;
 }
 
-// right-click menu on the log panes (Activity / Thinking / Commands / Docs /
+// right-click menu on the log panes (Activity / Thinking / Commands /
 // chat): copy the current selection, paste into the chat input.
 document.addEventListener("contextmenu", (e) => {
   const t = e.target as HTMLElement;
-  const logEl = t.closest("#tab-activity, #tab-thinking, #tab-commands, #tab-docs, #chat");
+  const logEl = t.closest("#tab-activity, #tab-thinking, #tab-commands, #chat");
   if (!logEl) return;
   e.preventDefault();
   const sel = window.getSelection();
