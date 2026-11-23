@@ -270,6 +270,34 @@ def test_browser_flow(site, ctx):
     browser.browser_close(ctx, {})
 
 
+def test_environment_block_in_system_prompt(tmp_path):
+    import platform
+    from coder_agent.prompts import PromptBuilder, PromptSections
+    from coder_agent.prompts.registry import TaskType, TaskTypeRegistry
+
+    reg = TaskTypeRegistry({"general": TaskType(name="general", description="", prefix="general work")}, "")
+    b = PromptBuilder(tmp_path, reg, PromptSections(base=False, task_prefix=False,
+                                                    instructions=False, indexes=False, memory=False))
+    out = b.build(reg.get("general"))
+    assert "# Environment" in out and "OS: " in out and platform.system() in out
+    # non-git dir: no branch line, no crash
+    assert "git branch:" not in out
+    # git dir: branch appears
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=tmp_path,
+                   env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}, check=True)
+    out = PromptBuilder(tmp_path, reg, PromptSections(base=False, task_prefix=False,
+                                                      instructions=False, indexes=False, memory=False,
+                                                      environment=True)).build(reg.get("general"))
+    assert "git branch:" in out
+    # switchable off
+    out = PromptBuilder(tmp_path, reg, PromptSections(base=False, task_prefix=False,
+                                                      instructions=False, indexes=False, memory=False,
+                                                      environment=False)).build(reg.get("general"))
+    assert "# Environment" not in out
+
+
 def test_vision_fallback_drops_images_for_text_only_model(monkeypatch):
     class Provider:
         server = ServerConfig(base_url="http://127.0.0.1:1/v1", model="m")

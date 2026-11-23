@@ -14,7 +14,7 @@
 | 5 | 上下文压缩：micro-compaction + 图片清理 | 中 | ✅ | `context/compression.py` |
 | 6 | 浏览器多 tab | 中 | ✅ | `tools/browser.py` |
 | 7 | 记忆自动沉淀（turn-end 提取） | 中 | ✅ | `knowledge.py` + `engine.py` |
-| 8 | 系统提示注入动态环境信息 | 中 | ⬜ | `prompts/builder.py` |
+| 8 | 系统提示注入动态环境信息 | 中 | ✅ | `prompts/builder.py` |
 | 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ⬜ | `tools/web.py` |
 | 10 | 循环检测模糊化（相似参数） | 低 | ✅ | `agent.py` 主循环 |
 | 11 | orchestrator 并行波次显式标记 | 低 | ⬜ | `orchestrator/orchestrator.py` |
@@ -76,9 +76,13 @@
   配置开关 `agent.memory_extraction`（默认开）；全程 best-effort 不抛异常。
 - **验证**：`test_extract_memory`（保存/去重/空/坏 JSON 不抛）。
 
-### 8. 系统提示动态环境信息 ⬜
+### 8. 系统提示动态环境信息 ✅
 - **问题**：`prompts/builder.py` 纯静态。
-- **方案**：注入当前时间、git 分支/脏状态、OS/平台。
+- **实现**：新增 `environment` section（默认开），`build()` 末尾追加
+  `# Environment`：当前时间、OS/平台、git 分支 + 未提交标记
+  （`_git_info` 5s 超时，非 git 目录静默跳过）。
+- **验证**：`test_environment_block_in_system_prompt`（git/非 git/关闭开关）；
+  backend 25 passed。
 
 ### 9. web_search 免 key fallback ⬜
 - **问题**：未配置 SEARXNG_URL / BRAVE_API_KEY 直接报错。
@@ -113,4 +117,6 @@
 - 2026-11-23：#6（浏览器多 tab：browser_new_tab / browser_switch_tab）完成。
   验证：backend 23 passed（浏览器 E2E 真实跑通）。已提交 5edabfe。
 - 2026-11-23：#7（turn 结束后台自动提取记忆，memory_saved 事件）完成。
-  验证：backend 24 passed。
+  验证：backend 24 passed。已提交 893075e。
+- 2026-11-23：#8（系统提示注入 # Environment：时间/OS/git 分支）完成。
+  验证：backend 25 passed。
