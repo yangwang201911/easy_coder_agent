@@ -103,7 +103,7 @@ echo if exist "%%PIDFILE%%" (
 echo   for /f "usebackq delims=" %%p in ("%%PIDFILE%%") do set PID=%%p
 echo   tasklist /FI "PID eq %%PID%%" 2^>nul ^| findstr /I "%%BIN%%" ^>nul
 echo   if not errorlevel 1 (
-echo     echo coder-agent-server already running (pid %%PID%%); one server per machine, use "stop" first 1^>^&2
+echo     echo coder-agent-server already running ^(pid %%PID%%^); one server per machine, use "stop" first 1^>^&2
 echo     exit /b 1
 echo   )
 echo )
@@ -121,7 +121,7 @@ echo )
 echo set ARGS=--host 0.0.0.0 --port %%PORT%% --token %%TOKEN%%
 echo for /f "tokens=2 delims=:" %%p in ('wmic process call create "%%~dp0%%BIN%% %%ARGS%%" ^| findstr "ProcessId "') do (
 echo   echo %%p^>%%PIDFILE%%
-echo   echo coder-agent-server started (pid %%p^)
+echo   echo coder-agent-server started ^(pid %%p^)
 echo )
 ) > "release\coder-agent-server.bat"
 rem plain-name launcher so customers can just double-click "coder-agent"
