@@ -29,7 +29,11 @@ rem updates package.json but not node_modules; esbuild then fails with
 rem "Could not resolve ..." for the new packages). NOTE: no multi-line
 rem "if (...) (...)" blocks here - cmd.exe mis-parses them (see the
 rem windows-linux-scripts skill); use labels instead.
-node -e "const fs=require('fs');const m=p=>fs.existsSync(p)?fs.statSync(p).mtimeMs:0;if(m('node_modules')===0||Math.max(m('package.json'),m('package-lock.json'))>m('node_modules'))process.exit(1)"
+rem NOTE: staleness is judged against node_modules/.package-lock.json, NOT
+rem node_modules itself - npm install rewrites the dir mtime, so a missing
+rem package (e.g. ssh2 added on a branch switch) would go unnoticed and the
+rem asar would ship without it ("Cannot find module 'ssh2'" at startup).
+node -e "const fs=require('fs');const m=p=>fs.existsSync(p)?fs.statSync(p).mtimeMs:0;if(m('node_modules/.package-lock.json')===0||Math.max(m('package.json'),m('package-lock.json'))>m('node_modules/.package-lock.json'))process.exit(1)"
 if errorlevel 1 goto :deps_stale
 goto :deps_ok
 :deps_stale
