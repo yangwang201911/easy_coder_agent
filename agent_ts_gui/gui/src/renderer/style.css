@@ -349,16 +349,24 @@ body.resizing-h * { cursor: row-resize !important; }
 .list li.current { font-weight: bold; }
 button.wide { margin: 4px; width: calc(100% - 8px); }
 
-/* terminals tab: list column + xterm pane */
+/* terminals tab: xterm pane + list column on the right */
 #bottom #tab-terminals { display: flex; overflow: hidden; padding: 0; }
 #term-list-col {
   flex: none; width: 150px; min-width: 110px;
   display: flex; flex-direction: column;
-  border-right: 1px solid var(--border);
+  border-left: 1px solid var(--border);
 }
-#term-list-toolbar { display: flex; gap: 4px; padding: 4px; border-bottom: 1px solid var(--border); }
-#term-list-toolbar button { flex: 1; padding: 2px 0; font-size: 12px; }
 #term-list { flex: 1; overflow-y: auto; }
+/* terminal actions shown in the tab bar while the Terminals tab is active */
+#term-actions { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+#term-actions button {
+  border: 1px solid var(--border); border-radius: 3px;
+  background: transparent; color: var(--text);
+  padding: 2px 7px; font-size: 12px; line-height: 1.2;
+}
+#term-actions button:hover { background: var(--hover); }
+/* maximize: the bottom panel takes the whole body height */
+body.term-maximized #mid, body.term-maximized #split-bottom { display: none; }
 /* hover-only close button on each terminal row */
 #term-list li { position: relative; }
 #term-list li .term-x {
@@ -495,6 +503,11 @@ button.wide { margin: 4px; width: calc(100% - 8px); }
 #send-row button:hover { background: var(--hover-strong); color: var(--text); }
 #send-row button svg { display: block; }
 #model-combo { font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* thinking effort chip next to the model chip (VS Code style) */
+#effort-combo {
+  font-size: 11px; padding: 3px 6px; border-radius: 6px;
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+}
 /* the send arrow: filled circle when active, gray when disabled */
 #send-btn { width: 28px; height: 28px; padding: 0; justify-content: center; }
 #send-btn:not(:disabled) { background: var(--text); color: var(--bg); }

@@ -304,7 +304,6 @@ function setBusy(busy: boolean) {
   // message as a "steer" - the agent picks it up at the next safe point (right
   // away if it is between model calls, after the current stream is aborted if it
   // is mid-reply, after the running command finishes if it is executing one)
-  sb.textContent = "Send";
   sb.disabled = false;
   sb.title = busy
     ? "Send (Enter): queues your message; the agent picks it up at the next safe point"
@@ -1530,6 +1529,7 @@ const SETTINGS_TIPS: Record<string, string> = {
   confirm_each_stage: "Ask for confirmation after every stage",
   prompt_dump: "Write every request sent to the LLM server to a JSON file (Settings > Debug > View dumps)",
   api_key: "Auth key for the LLM server (OpenAI-compatible endpoints). Previously used keys are offered as suggestions; stored locally in this app only.",
+  base_url: "The LLM server this app talks to (OpenAI-compatible endpoint). http://127.0.0.1:8000/v1 = a server on this machine (e.g. vLLM); for Ollama use http://127.0.0.1:11434/v1. A remote GPU box: http://&lt;host&gt;:&lt;port&gt;/v1.",
 };
 
 // ------------------------------------------------- prompt dumps viewer
@@ -1663,27 +1663,55 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       h[provider] = [model, ...list.filter((x) => x !== model)].slice(0, 50);
       try { localStorage.setItem(MODEL_HIST_KEY, JSON.stringify(h)); } catch { /* ignore */ }
     }
+    // ---- model dropdown: starts empty; the list is fetched from the
+    // configured base_url when the user opens the dropdown
     // guard: if the config has not loaded yet (Settings opened before the
     // project finished opening) the server fields may be absent - skip the
-    // model-history datalist instead of crashing the whole dialog
-    const modelInput = modelPage.querySelector<HTMLInputElement>('[data-s="server"][data-k="model"]');
-    const providerSel = modelPage.querySelector<HTMLElement>('[data-s="server"][data-k="provider"]');
-    let updateModelDl: (() => void) | null = null;
-    if (modelInput && providerSel) {
-      const input = modelInput;
-      modelInput.setAttribute("list", "model-dl");
-      const modelDl = modelPage.ownerDocument.createElement("datalist");
-      modelDl.id = "model-dl";
-      modelPage.appendChild(modelDl);
-      updateModelDl = () => {
-        const provider = cfg.server?.provider ?? "";
-        const cur = input.value.trim();
-        const list = modelHistory()[provider] ?? [];
-        const opts = cur && !list.includes(cur) ? [cur, ...list] : list;
-        modelDl.innerHTML = opts.map((m) => `<option value="${esc(m)}"></option>`).join("");
-      };
-      updateModelDl();
-      providerSel.addEventListener("change", () => updateModelDl?.());
+    // dropdown instead of crashing the whole dialog
+    const modelInput = modelPage.querySelector<HTMLElement>('[data-s="server"][data-k="model"]');
+    let modelSel: HTMLSelectElement | null = null;
+    let modelLoadedFor = ""; // base_url the options were fetched for
+    function populateModelSel(models: string[]): void {
+      if (!modelSel) return;
+      const cur = modelSel.value;
+      modelSel.innerHTML = "";
+      modelSel.appendChild(new Option("(select a model…)", ""));
+      for (const x of models) modelSel.appendChild(new Option(x, x));
+      if (cur && models.includes(cur)) modelSel.value = cur;
+    }
+    async function loadModelList(): Promise<void> {
+      if (!modelSel) return;
+      const m = modelPage.querySelector(".msg") as HTMLElement;
+      const url = (modelPage.querySelector<HTMLInputElement>('[data-s="server"][data-k="base_url"]')?.value ?? "").trim();
+      if (url === modelLoadedFor) return; // already loaded for this server
+      m.className = "msg"; m.textContent = "Loading model list…";
+      const r = await call("test_connection", { config: collect() });
+      if (r && r.__error) {
+        showMsg(modelPage, false, `Cannot reach the model server at ${url || "(no base url set)"}: ${String(r.__error)}`);
+        return;
+      }
+      const models: string[] = r.models ?? [];
+      const provider = collect().server?.provider ?? "";
+      for (const x of models) recordModel(provider, x);
+      populateModelSel(models);
+      modelLoadedFor = url;
+      m.className = "msg"; m.textContent = "";
+    }
+    if (modelInput) {
+      const cur = (modelInput as HTMLInputElement).value;
+      const sel = modelPage.ownerDocument.createElement("select");
+      sel.dataset.s = "server";
+      sel.dataset.k = "model";
+      modelInput.replaceWith(sel);
+      modelSel = sel;
+      sel.appendChild(new Option("(click to load from server…)", ""));
+      if (cur) sel.appendChild(new Option(cur, cur)); // keep the saved value selectable
+      sel.value = cur || "";
+      sel.addEventListener("click", () => void loadModelList());
+      sel.addEventListener("focus", () => void loadModelList());
+      // a changed base_url invalidates the loaded list
+      modelPage.querySelector<HTMLInputElement>('[data-s="server"][data-k="base_url"]')
+        ?.addEventListener("change", () => { modelLoadedFor = ""; });
     }
 
     // ---- base_url history (localStorage): quick-pick previously used URLs
@@ -2085,7 +2113,8 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       recordBaseUrl(c.server?.base_url ?? "");
       recordApiKey(c.server?.api_key ?? "");
       for (const m of r.models ?? []) recordModel(provider, m);
-      updateModelDl?.();
+      populateModelSel(r.models ?? []);
+      modelLoadedFor = c.server?.base_url ?? "";
       const vision = r.vision === false ? "\n\n⚠ This model does NOT accept images (text-only)."
         : r.vision === true ? "\n\n✓ This model accepts images." : "";
       showMsg(modelPage, true, `Models:\n${(r.models ?? []).join("\n")}\n\n${r.context_text ?? ""}${vision}`);
@@ -2584,6 +2613,22 @@ function bindTabs(barId: string, pagesId: string, pagePrefix: string) {
 }
 bindTabs("left-tabs", "left-pages", "tab-");
 bindTabs("right-tabs", "bottom", "tab-");
+// show the terminal action buttons (＋ / maximize / hide) only while the
+// Terminals tab is active
+document.querySelectorAll<HTMLButtonElement>("#right-tabs .tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    $("term-actions").classList.toggle("hidden", btn.dataset.tab !== "terminals");
+  });
+});
+// maximize: expand the main display area (file view) to fill the whole body
+$("term-max-btn").addEventListener("click", () => {
+  document.body.classList.toggle("term-maximized");
+});
+// hide: collapse the bottom panel
+$("term-hide-btn").addEventListener("click", () => {
+  $("split-bottom").classList.add("hidden");
+  $("bottom").classList.add("hidden");
+});
 $("tree-refresh-btn").addEventListener("click", () => void refreshFileTree());
 // open a local web page in a browser tab (mid pane)
 function webUrlSubmit() {
