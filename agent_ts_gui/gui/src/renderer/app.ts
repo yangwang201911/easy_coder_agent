@@ -171,6 +171,7 @@ const S = {
   pendingDocs: new Map<string, string>(),
   toolPaths: new Map<string, string>(), // tool_call id -> file path (for clickable results)
   planDict: null as Record<string, any> | null,
+  todos: [] as { content: string; status: string }[], // update_todo checklist (collapsible panel above the input)
 };
 
 // --------------------------------------------------------------- rpc client
@@ -430,6 +431,7 @@ function resetViews() {
   planView.innerHTML = "";
   S.planDict = null;
   S.pendingDocs.clear();
+  renderTodos();
   S.block = null;
   S.mdBlock = null;
   S.curTurnBlocks = [];
@@ -2202,6 +2204,8 @@ function onEvent(ev: AgentEvent) {
     S.curTurnBlocks = [];
     thinking.clear();
     S.thinkChars = 0;
+    S.todos = [];
+    renderTodos();
     userPromptCard(d.prompt, `[${d.task_type}]  ${stampOf(ev.ts)}`);
     if (Array.isArray(d.images) && d.images.length) {
       const im = document.createElement("span");
@@ -2359,6 +2363,10 @@ function onEvent(ev: AgentEvent) {
       // null = cancelled (plan rejected); otherwise the (possibly edited) plan dict
       await call("answer", { req_id: d.req_id, response: plan });
     })();
+  } else if (k === "todo_updated") {
+    S.todos = Array.isArray(d.todos) ? d.todos : [];
+    renderTodos();
+    log(ev, `todos ${S.todos.filter((t) => t.status === "done").length}/${S.todos.length}`);
   } else if (k === "web_open") {
     // the agent asked to show a local page in a browser tab
     openWeb(String(d.url ?? ""));
@@ -2381,6 +2389,33 @@ function stampOf(epochSec: number): string {
   const ts = new Date(epochSec * 1000);
   return `${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`;
 }
+
+// -------------------------------------------------------------------- todos
+const TODO_MARKS: Record<string, string> = { done: "☑", in_progress: "◉", pending: "○" };
+
+function renderTodos() {
+  const panel = $("todo-panel");
+  const list = $("todo-list");
+  list.innerHTML = "";
+  if (!S.todos.length) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  const done = S.todos.filter((t) => t.status === "done").length;
+  $("todo-title").textContent = `Todos (${done}/${S.todos.length})`;
+  for (const t of S.todos) {
+    const li = document.createElement("li");
+    li.className = `todo-${t.status}`;
+    const mark = document.createElement("span");
+    mark.className = "todo-mark";
+    mark.textContent = TODO_MARKS[t.status] ?? "○";
+    const text = document.createElement("span");
+    text.className = "todo-text";
+    text.textContent = t.content;
+    li.append(mark, text);
+    list.appendChild(li);
+  }
+}
+
+$("todo-header").addEventListener("click", () => $("todo-panel").classList.toggle("todo-collapsed"));
 
 // -------------------------------------------------------------------- plan
 const PLAN_COLORS: Record<string, string> = {

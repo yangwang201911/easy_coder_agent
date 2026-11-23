@@ -297,7 +297,41 @@ body.resizing-h * { cursor: row-resize !important; }
 #session-chat-view #chat { flex: 1; min-height: 0; }
 /* the input box is a direct child of the sessions tab, so it stays visible
    in both the list view and the chat view */
-#tab-sessions > #input-resize, #tab-sessions > #input-zone, #tab-sessions > #ask-panel { flex: none; }
+#tab-sessions > #input-resize, #tab-sessions > #input-zone, #tab-sessions > #ask-panel, #tab-sessions > #todo-panel { flex: none; }
+
+/* collapsible todo checklist above the input box */
+#todo-panel {
+  margin: 0 10px 4px;
+  max-height: 40%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#todo-header {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none; background: transparent;
+  color: var(--text); font: inherit; font-size: 12px; font-weight: 600;
+  cursor: pointer; text-align: left;
+}
+#todo-caret { display: inline-block; transition: transform .12s; }
+#todo-panel.todo-collapsed #todo-caret { transform: rotate(-90deg); }
+#todo-panel.todo-collapsed #todo-list { display: none; }
+#todo-list { list-style: none; margin: 0; padding: 0 0 4px; overflow-y: auto; min-height: 0; }
+#todo-list li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 12px; font-size: 12px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+#todo-list .todo-mark { flex: none; font-size: 13px; line-height: 1; }
+#todo-list li.todo-done .todo-mark { color: var(--accent); }
+#todo-list li.todo-done .todo-text { color: var(--text-soft); text-decoration: line-through; }
+#todo-list li.todo-in_progress .todo-mark { color: var(--accent); }
+#todo-list li.todo-in_progress .todo-text { font-weight: 600; }
 
 /* lists */
 .list { list-style: none; margin: 0; padding: 0; }

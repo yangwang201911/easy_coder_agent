@@ -41,6 +41,7 @@ class Turn:
     archive: list[dict] = field(default_factory=list)  # this turn's messages removed by compaction (display only)
     files_changed: list[str] = field(default_factory=list)
     ran_commands: bool = False  # shell side-effects cannot be rolled back
+    todos: list[dict] = field(default_factory=list)  # update_todo checklist at turn end (display only)
     status: str = "running"  # running | done | cancelled | error | max_steps | loop
     final_text: str = ""
     subtasks: list[dict] = field(default_factory=list)  # plan turns: id/title/status/summary

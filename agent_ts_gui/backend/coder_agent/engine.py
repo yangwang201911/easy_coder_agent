@@ -120,6 +120,9 @@ class Engine:
 
             provider = self._provider_override or create_provider(self.config)
             registry = self.registry.subset([*tt.tools, *self.mcp_tool_names]) if tt.tools else self.registry
+            # carry the checklist over from the previous turn so it survives across turns
+            prev = self.session.path()
+            prev_todos = prev[-2].todos if len(prev) >= 2 else []
             tool_ctx = ToolContext(
                 root=self.root,
                 cancel=self.cancel_event,
@@ -128,6 +131,7 @@ class Engine:
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
                 ask_user=self.asker,
+                todos=list(prev_todos),
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,
@@ -148,6 +152,7 @@ class Engine:
             # The user message is already in turn.messages and in `messages`.
             result = agent.run(messages, on_append=on_append, on_compact=on_compact)
             turn.ran_commands = agent.ran_commands
+            turn.todos = list(tool_ctx.todos)
             self.session.finish_turn(turn, result.status, result.final_text)
             self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error)
             self.bus.emit("status", state="idle", detail="")
