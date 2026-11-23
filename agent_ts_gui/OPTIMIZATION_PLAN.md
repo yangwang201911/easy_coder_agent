@@ -15,7 +15,7 @@
 | 6 | 浏览器多 tab | 中 | ✅ | `tools/browser.py` |
 | 7 | 记忆自动沉淀（turn-end 提取） | 中 | ✅ | `knowledge.py` + `engine.py` |
 | 8 | 系统提示注入动态环境信息 | 中 | ✅ | `prompts/builder.py` |
-| 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ⬜ | `tools/web.py` |
+| 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ✅ | `tools/web.py` |
 | 10 | 循环检测模糊化（相似参数） | 低 | ✅ | `agent.py` 主循环 |
 | 11 | orchestrator 并行波次显式标记 | 低 | ⬜ | `orchestrator/orchestrator.py` |
 | 12 | 工具结果缓存（同 turn 重复读取） | 低 | ⬜ | `tools/base.py` |
@@ -84,9 +84,12 @@
 - **验证**：`test_environment_block_in_system_prompt`（git/非 git/关闭开关）；
   backend 25 passed。
 
-### 9. web_search 免 key fallback ⬜
+### 9. web_search 免 key fallback ✅
 - **问题**：未配置 SEARXNG_URL / BRAVE_API_KEY 直接报错。
-- **方案**：内置 DuckDuckGo HTML 端点解析作为 fallback。
+- **实现**：`_duckduckgo`（`html.duckduckgo.com/html/` 公开端点，正则提取
+  `result__a`/`result__snippet`，解包 `/l/?uddg=` 重定向）作为第三级 fallback；
+  无结果时返回友好消息而非报错。
+- **验证**：`test_search_ddg_fallback`（mock `_http_get`，覆盖重定向解包/无结果）。
 
 ### 10. 循环检测模糊化 ✅
 - **问题**：只检测参数逐字相同的重复调用，抓不住"换个路径再试一次"的打转。

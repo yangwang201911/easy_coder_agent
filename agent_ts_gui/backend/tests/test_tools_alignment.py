@@ -140,11 +140,28 @@ def test_web_search_and_fetch(site, ctx, monkeypatch):
         web.web_fetch(ctx, {"url": "file:///etc/passwd"})
 
 
-def test_search_unconfigured_raises(ctx, monkeypatch):
+def test_search_ddg_fallback(ctx, monkeypatch):
     monkeypatch.delenv("SEARXNG_URL", raising=False)
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
-    with pytest.raises(ToolError, match="not configured"):
-        web.web_search(ctx, {"query": "x"})
+    page = (
+        b'<html><body><div class="result">'
+        b'<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.python.org%2F&rut=x">Python &amp; docs</a>'
+        b'<a class="result__snippet" href="#">Official <b>docs</b> site</a>'
+        b'</div><div class="result">'
+        b'<a class="result__a" href="https://example.org/x">Second</a>'
+        b'</div></body></html>'
+    )
+    monkeypatch.setattr(web, "_http_get", lambda url, headers, timeout: ("text/html", page))
+    out = web.web_search(ctx, {"query": "python", "max_results": 2})
+    assert "1. Python & docs" in out and "https://docs.python.org/" in out  # uddg redirect unwrapped
+    assert "Official docs site" in out and "2. Second" in out and "https://example.org/x" in out
+    # no results -> friendly message, no raise
+    monkeypatch.setattr(web, "_http_get", lambda url, headers, timeout: ("text/html", b"<html></html>"))
+    assert web.web_search(ctx, {"query": "zzz"}) == "no results for 'zzz'"
+    # approval target follows the active backend
+    assert web._search_host({}) == "html.duckduckgo.com"
+    monkeypatch.setenv("SEARXNG_URL", "http://127.0.0.1:8080")
+    assert web._search_host({}) == "127.0.0.1"
 
 
 def test_extract_memory(tmp_path):

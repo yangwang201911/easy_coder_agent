@@ -89,6 +89,34 @@ def _brave(key: str, query: str, n: int) -> list[dict]:
     return [{"title": _clean(r.get("title")), "url": r.get("url", ""), "snippet": _clean(r.get("description"))} for r in rows]
 
 
+_DDG_LINK_RE = re.compile(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>')
+_DDG_SNIP_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.S)
+
+
+def _ddg_real_url(href: str) -> str:
+    """DuckDuckGo wraps results in a redirect (/l/?uddg=<url-encoded>); unwrap it."""
+    if href.startswith("//"):
+        href = "https:" + href
+    q = urllib.parse.urlparse(href).query
+    if "uddg=" in q:
+        return urllib.parse.parse_qs(q).get("uddg", [href])[0]
+    return href
+
+
+def _duckduckgo(query: str, n: int) -> list[dict]:
+    """Keyless fallback: the public DuckDuckGo HTML endpoint."""
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    _, body = _http_get(url, {"Accept": "text/html"}, SEARCH_TIMEOUT)
+    text = body.decode("utf-8", errors="replace")
+    links = _DDG_LINK_RE.findall(text)
+    snips = [_clean(s) for s in _DDG_SNIP_RE.findall(text)]
+    rows = []
+    for i, (href, title) in enumerate(links[:n]):
+        rows.append({"title": _clean(title), "url": _ddg_real_url(href),
+                     "snippet": snips[i] if i < len(snips) else ""})
+    return rows
+
+
 def web_search(ctx: ToolContext, a: dict) -> str:
     query = str(a["query"]).strip()
     if not query:
@@ -99,10 +127,7 @@ def web_search(ctx: ToolContext, a: dict) -> str:
     elif os.environ.get("BRAVE_API_KEY"):
         rows = _brave(os.environ["BRAVE_API_KEY"], query, n)
     else:
-        raise ToolError(
-            "web search is not configured: set SEARXNG_URL (self-hosted SearXNG with json format enabled) "
-            "or BRAVE_API_KEY"
-        )
+        rows = _duckduckgo(query, n)  # keyless fallback
     if not rows:
         return f"no results for '{query}'"
     return "\n\n".join(
@@ -138,7 +163,9 @@ def web_fetch(ctx: ToolContext, a: dict) -> str:
 
 
 def _search_host(a: dict) -> str:
-    base = os.environ.get("SEARXNG_URL") or "https://api.search.brave.com"
+    base = (os.environ.get("SEARXNG_URL")
+            or ("https://api.search.brave.com" if os.environ.get("BRAVE_API_KEY") else None)
+            or "https://html.duckduckgo.com")
     return urllib.parse.urlparse(base).hostname or ""
 
 
