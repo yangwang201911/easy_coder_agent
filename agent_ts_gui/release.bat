@@ -24,6 +24,23 @@ if errorlevel 1 exit /b 1
 
 echo ==^> building GUI (electron-builder)
 cd gui
+rem make sure npm dependencies are present and up to date (a branch switch
+rem updates package.json but not node_modules; esbuild then fails with
+rem "Could not resolve ..." for the new packages)
+node -e "const fs=require('fs');const m=p=>fs.existsSync(p)?fs.statSync(p).mtimeMs:0;if(m('node_modules')===0||Math.max(m('package.json'),m('package-lock.json'))>m('node_modules'))process.exit(1)"
+if errorlevel 1 (
+  echo node_modules is missing or stale (package.json changed), running npm install...
+  call npm install
+  if errorlevel 1 exit /b 1
+)
+rem electron binary must be in place (its postinstall downloads from GitHub,
+rem which often fails on restricted networks - see README "China / restricted network")
+if not exist "node_modules\electron\dist\electron.exe" (
+  echo ERROR: node_modules\electron\dist\electron.exe is missing.
+  echo Download the electron zip manually (see README "China / restricted network")
+  echo and extract it into node_modules\electron\dist, then re-run release.bat.
+  exit /b 1
+)
 call npm run dist:win
 if errorlevel 1 exit /b 1
 
