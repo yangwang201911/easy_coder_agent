@@ -56,7 +56,8 @@ def server_process(tmp_path, request):
     makes the first stream block until a steer arrives; a tuple
     ``(n_writes, block_n)`` blocks the n-th stream (used by the steer test)."""
     param = getattr(request, "param", None)
-    if param is None:
+    fake_ask = param == "ask"
+    if param is None or fake_ask:
         n_writes, fake_steer = 1, ""
     elif isinstance(param, int):
         n_writes, fake_steer = param, ""
@@ -74,7 +75,7 @@ def server_process(tmp_path, request):
     (project / ".agent" / "approval.toml").write_text("[paths]\nauto_approve = false\n", encoding="utf-8")
 
     env = dict(os.environ, CODER_AGENT_HOME=str(home), FAKE_WRITES=str(n_writes),
-               FAKE_STEER=fake_steer)
+               FAKE_STEER=fake_steer, FAKE_ASK="1" if fake_ask else "")
     code = (
         "import asyncio, json, os, sys, threading\n"
         "from coder_agent.llm import LLMProvider\n"
@@ -86,6 +87,9 @@ def server_process(tmp_path, request):
         "            {'content': 'writing', 'tool_calls': [('write_file', {'path': 'hello.txt', 'content': 'hi'})]}\n"
         "            for _ in range(int(os.environ.get('FAKE_WRITES', '1')))\n"
         "        ] + [{'content': 'all done'}]\n"
+        "        if os.environ.get('FAKE_ASK'):\n"
+        "            self.script = [{'content': 'asking', 'tool_calls': [('ask_user', {'question': 'Done?', 'options': ['yes', 'no']})]},\n"
+        "                           {'content': 'got it'}]\n"
         "        self.steer_gate = threading.Event()  # set by the steer RPC (test hook)\n"
         "        self._n_calls = 0\n"
         "        self._block_n = int(os.environ.get('FAKE_STEER', '0') or 0)  # block this stream n\n"
@@ -458,5 +462,46 @@ def test_delete_sessions(server_process):
             # deleting the current session starts a fresh one
             r = await c.call("delete_sessions", session_ids=[current])
             assert r["ok"] and r["new_session"] != current
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", ["ask"], indirect=True)
+def test_ask_user_round_trip(server_process):
+    """The model calls ask_user: the GUI gets ask_user_requested and the answer reaches the model."""
+    url, project, _home, _block = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="ask me something")
+            ev = await c.wait_event("ask_user_requested")
+            assert ev["data"]["question"] == "Done?"
+            assert [o["label"] for o in ev["data"]["options"]] == ["yes", "no"]
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"answer": "no", "custom": False})
+            res = await c.wait_event("tool_result", match=lambda e: e["data"].get("name") == "ask_user")
+            assert res["data"]["ok"] and "The user chose: no" in res["data"]["text"]
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done", fin
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("server_process", ["ask"], indirect=True)
+def test_ask_user_dismissed(server_process):
+    url, project, _home, _block = server_process
+
+    async def scenario():
+        async with websockets.connect(url) as ws:
+            c = Client(ws)
+            await c.call("open_project", root=str(project))
+            await c.call("submit", prompt="ask me something")
+            ev = await c.wait_event("ask_user_requested")
+            await c.call("answer", req_id=ev["data"]["req_id"], response={"dismissed": True})
+            res = await c.wait_event("tool_result", match=lambda e: e["data"].get("name") == "ask_user")
+            assert "dismissed" in res["data"]["text"]
+            fin = await c.wait_event("turn_finished")
+            assert fin["data"]["status"] == "done"
 
     asyncio.run(scenario())

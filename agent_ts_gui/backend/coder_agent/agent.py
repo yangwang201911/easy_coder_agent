@@ -16,6 +16,7 @@ from .context import ContextManager
 from .events import EventBus
 from .llm import LLMCancelled, LLMError, LLMProvider, ToolCall, extract_text_tool_calls
 from .llm.prompt_dump import set_agent_id
+from .llm.server_info import probe_vision
 from .tools.base import ToolContext, ToolOutput, ToolRegistry
 from .util import truncate_middle
 
@@ -188,6 +189,10 @@ class Agent:
         self._emit("tool_result", name=tc.name, ok=ok, text=text, id=tc.id)
         return text, (out.images if ok else [])
 
+    def _images_supported(self) -> bool:
+        server = getattr(self.provider, "server", None)
+        return server is None or probe_vision(server) is not False
+
     def _after_tool(self, tool, args: dict, ok: bool, text: str) -> str:
         """Discipline for debugging: skill injection on failures and a nudge when commands keep failing."""
         if tool.name == "debug_backtrace":
@@ -226,7 +231,15 @@ class Agent:
         if tool.kind == "read":
             return None
         ctx = self.tool_ctx
-        if tool.kind == "exec":
+        if tool.kind == "network":
+            kind = "network"
+            subject = tool.target_of(args) if tool.target_of else ""
+            decision = self.policy.check_network(subject)
+        elif tool.kind == "mcp":
+            kind = "mcp"
+            subject = tool.name
+            decision = self.policy.check_mcp(subject)
+        elif tool.kind == "exec":
             kind = "command"
             subject = tool.command_of(args) if tool.command_of else args.get("command", "")
             try:
@@ -256,11 +269,16 @@ class Agent:
         req = ApprovalRequest(
             kind=kind,
             tool=tool.name,
-            title=subject if kind == "write" else f"Run command ({decision.reason})",
+            title=subject if kind == "write" else (
+                f"Network: {subject}" if kind == "network"
+                else f"MCP tool: {subject}" if kind == "mcp" else f"Run command ({decision.reason})"
+            ),
             detail=detail,
             args=args,
             suggested_rule=self.policy.suggest_rule(
-                kind, {"path": subject} if kind == "write" else {"command": subject}),
+                kind, {"path": subject} if kind == "write"
+                else {"host": subject} if kind == "network"
+                else {"name": subject} if kind == "mcp" else {"command": subject}),
         )
         self._emit("status", state="waiting_user", detail=req.title)
         self._emit("approval_requested", request=req)
@@ -369,9 +387,12 @@ class Agent:
                         images = []
                     else:
                         result, images = self._run_tool(tc)
+                    if images and not self._images_supported():
+                        result += "\n[image omitted: the configured model is text-only]"
+                        images = []
                     add({"role": "tool", "tool_call_id": tc.id, "content": result})
                     if images:
-                        # a tool produced a picture (e.g. web_screenshot): hand it to the
+                        # a tool produced a picture (e.g. browser_take_screenshot): hand it to the
                         # model as a user message with image parts - tool-role messages
                         # cannot carry images in the OpenAI wire format
                         add({"role": "user", "content": [

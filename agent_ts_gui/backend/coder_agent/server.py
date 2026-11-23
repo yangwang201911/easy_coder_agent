@@ -106,6 +106,12 @@ class ApprovalAsk:
         self.server = server
         self._next = 0
 
+    def ask_user(self, data: dict) -> dict:
+        req_id, p = self.server.question("ask", {"dismissed": True}, dict(data))
+        self.server.push_event("ask_user_requested", "main", dict(data, req_id=req_id))
+        resp = self.server.wait(p)
+        return resp if isinstance(resp, dict) else {"dismissed": True}
+
     def ask(self, req: ApprovalRequest) -> ApprovalResponse:
         data = dict(_jsonable(req))
         req_id, p = self.server.question("approval", ApprovalResponse(False, "cancelled by user"), data)
@@ -330,11 +336,14 @@ class Server:
         session = Session.load(root, session_id) if session_id else None
         if self._unsubscribe is not None:
             self._unsubscribe()
+        if self.engine is not None:
+            self.engine.close()
         self.engine = Engine(cfg, root, EventBus(), approver=None, session=session)
         self.bus = self.engine.bus
         self.approvals = ApprovalAsk(self)
         self.plans = PlanAsk(self)
         self.engine.approver = _serialised(self.approvals.ask)
+        self.engine.asker = _serialised(self.approvals.ask_user)
         if self.provider_factory is not None:
             self.engine._provider_override = self.provider_factory()
         self._unsubscribe = self.bus.subscribe(self._on_bus_event)
@@ -807,7 +816,8 @@ class Server:
         # session_detail / the live event stream when it reconnects. Pending
         # questions are auto-answered by attach() if they outlive the gap.
 
-    _KIND_BY_PREFIX = {"approval": "approval_requested", "plan": "plan_review_requested", "stage": "stage_confirm_requested"}
+    _KIND_BY_PREFIX = {"approval": "approval_requested", "plan": "plan_review_requested",
+                       "stage": "stage_confirm_requested", "ask": "ask_user_requested"}
 
     def _question_kind(self, req_id: str) -> str:
         return self._KIND_BY_PREFIX.get(req_id.split("-", 1)[0], "approval_requested")

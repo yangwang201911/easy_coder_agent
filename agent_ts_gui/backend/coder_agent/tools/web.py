@@ -1,144 +1,187 @@
-"""Web page tools: open a page in the GUI and screenshot local web servers.
-
-``web_screenshot`` renders a page with a headless Chrome (the same browser the
-GUI ships with) and returns the screenshot as an image the model can see -
-this closes the "agent starts a web server, looks at the page, fixes it" loop.
-``web_open`` asks the GUI to show the page in a browser tab next to the file
-viewer, so the user can follow along.
-"""
+"""Web search and page fetch over HTTP. Browser tools live in browser.py."""
 
 from __future__ import annotations
 
-import base64
-import ipaddress
+import html
+import json
 import os
-import shutil
-import subprocess
-import tempfile
+import re
+import urllib.error
 import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
 from typing import Optional
 
-from .base import Tool, ToolContext, ToolError, ToolOutput
+from .base import Tool, ToolContext, ToolError
 
-DEFAULT_TIMEOUT = 30  # headless chrome is slow to start on busy machines
-MAX_TIMEOUT = 90
-MAX_EDGE = 1280  # keep the screenshot token-friendly for common vision models
+# ------------------------------------------------------------ web search / fetch
+
+SEARCH_TIMEOUT = 20
+FETCH_TIMEOUT = 30
+MAX_FETCH_BYTES = 2 * 1024 * 1024
+MAX_FETCH_TEXT = 20000  # chars of extracted text returned to the model
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) coder-agent/0.1"
+_TAG_RE = re.compile(r"<[^>]+>")
+_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "pre"}
+_SKIP_TAGS = {"script", "style", "noscript", "svg", "head", "template"}
 
 
-def _find_chrome() -> Optional[str]:
-    for name in ("google-chrome", "chromium", "chromium-browser", "google-chrome-stable", "chrome"):
-        p = shutil.which(name)
-        if p:
-            return p
-    return None
+class _TextExtractor(HTMLParser):
+    """Collects the visible text and the <title> of an HTML document."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title = ""
+        self._skip = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip = max(0, self._skip - 1)
+        elif tag == "title":
+            self._in_title = False
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title += data
+        elif not self._skip:
+            self.parts.append(data)
 
 
-def _check_url(url: str) -> str:
-    """Only local / private hosts are allowed (the agent must not screenshot arbitrary sites)."""
+def _http_get(url: str, headers: dict, timeout: float) -> tuple[str, bytes]:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **headers})
     try:
-        u = urllib.parse.urlparse(url)
-    except ValueError as e:
-        raise ToolError(f"invalid url: {e}")
-    if u.scheme not in ("http", "https"):
-        raise ToolError(f"only http(s) urls are supported, got '{u.scheme}'")
-    host = u.hostname or ""
-    if host in ("localhost",):
-        return url
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # not an IP literal: only allow hostnames that look local (no public lookups here)
-        if not (host.endswith(".local") or host.endswith(".lan") or "." not in host):
-            raise ToolError(f"host '{host}' is not a local/private address")
-        return url
-    if not (ip.is_loopback or ip.is_private or ip.is_link_local):
-        raise ToolError(f"host '{host}' is not a local/private address; only local web servers can be screenshotted")
-    return url
+        # honours HTTP(S)_PROXY, needed for internet access on this host
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.headers.get("Content-Type", ""), resp.read(MAX_FETCH_BYTES)
+    except urllib.error.HTTPError as e:
+        raise ToolError(f"HTTP {e.code} from {urllib.parse.urlparse(url).netloc}")
+    except OSError as e:  # URLError, timeouts, connection resets
+        raise ToolError(f"request failed: {getattr(e, 'reason', e)}")
 
 
-def web_screenshot(ctx: ToolContext, a: dict) -> ToolOutput:
-    url = _check_url(str(a["url"]).strip())
-    timeout = max(1, min(int(a.get("timeout", DEFAULT_TIMEOUT)), MAX_TIMEOUT))
-    chrome = _find_chrome()
-    if not chrome:
+def _clean(s: Optional[str]) -> str:
+    return " ".join(html.unescape(_TAG_RE.sub("", s or "")).split())
+
+
+def _searxng(base: str, query: str, n: int) -> list[dict]:
+    url = base.rstrip("/") + "/search?" + urllib.parse.urlencode({"q": query, "format": "json"})
+    _, body = _http_get(url, {"Accept": "application/json"}, SEARCH_TIMEOUT)
+    rows = json.loads(body).get("results", [])[:n]
+    return [{"title": _clean(r.get("title")), "url": r.get("url", ""), "snippet": _clean(r.get("content"))} for r in rows]
+
+
+def _brave(key: str, query: str, n: int) -> list[dict]:
+    url = "https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": query, "count": n})
+    _, body = _http_get(url, {"Accept": "application/json", "X-Subscription-Token": key}, SEARCH_TIMEOUT)
+    rows = json.loads(body).get("web", {}).get("results", [])[:n]
+    return [{"title": _clean(r.get("title")), "url": r.get("url", ""), "snippet": _clean(r.get("description"))} for r in rows]
+
+
+def web_search(ctx: ToolContext, a: dict) -> str:
+    query = str(a["query"]).strip()
+    if not query:
+        raise ToolError("query is empty")
+    n = max(1, min(int(a.get("max_results", 5)), 10))
+    if os.environ.get("SEARXNG_URL"):
+        rows = _searxng(os.environ["SEARXNG_URL"], query, n)
+    elif os.environ.get("BRAVE_API_KEY"):
+        rows = _brave(os.environ["BRAVE_API_KEY"], query, n)
+    else:
         raise ToolError(
-            "no Chrome/Chromium found on this machine - install google-chrome or chromium "
-            "to enable web_screenshot"
+            "web search is not configured: set SEARXNG_URL (self-hosted SearXNG with json format enabled) "
+            "or BRAVE_API_KEY"
         )
-    profile = tempfile.mkdtemp(prefix="agent-chrome-")
-    # --virtual-time-budget: fast-forwards timers so headless chrome exits once the
-    # page has settled (plain --headless=new hangs in some environments)
-    cmd = [
-        chrome, "--headless", "--no-sandbox", "--disable-gpu",
-        f"--user-data-dir={profile}",
-        f"--window-size={MAX_EDGE},900",
-        "--virtual-time-budget=6000",
-        f"--screenshot={profile}/shot.png",
-        url,
-    ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ToolError(f"screenshot timed out after {timeout}s (is the server at {url} running?)")
-    except FileNotFoundError:
-        raise ToolError("chrome binary disappeared; cannot screenshot")
-    shot = f"{profile}/shot.png"
-    if not os.path.exists(shot) or os.path.getsize(shot) < 100:
-        err = (proc.stderr or proc.stdout or "").strip()[-300:]
-        raise ToolError(f"page did not render (server down or error page): {err or 'unknown error'}")
-    with open(shot, "rb") as f:
-        data = f.read()
-    if len(data) > 8 * 1024 * 1024:  # a few MB of PNG is plenty for a page
-        raise ToolError("screenshot too large; the page is probably not a normal web view")
-    shutil.rmtree(profile, ignore_errors=True)
-    name = url.replace("://", "_")[:60]
-    return ToolOutput(
-        text=f"screenshot of {url} attached below ({len(data) // 1024} KB). "
-             "Inspect the rendered page and keep going.",
-        images=[{"name": name, "data_url": "data:image/png;base64," + base64.b64encode(data).decode()}],
+    if not rows:
+        return f"no results for '{query}'"
+    return "\n\n".join(
+        f"{i}. {r['title']}\n   {r['url']}" + (f"\n   {r['snippet']}" if r["snippet"] else "")
+        for i, r in enumerate(rows, 1)
     )
 
 
-def web_open(ctx: ToolContext, a: dict) -> str:
-    url = _check_url(str(a["url"]).strip())
-    ctx.emit("web_open", {"url": url})
-    return f"asked the GUI to open {url} in a browser tab (the user can now see it)"
+def web_fetch(ctx: ToolContext, a: dict) -> str:
+    url = str(a["url"]).strip()
+    u = urllib.parse.urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ToolError("only absolute http(s) urls are supported")
+    ctype, body = _http_get(url, {"Accept": "text/html,text/plain,application/json;q=0.9"}, FETCH_TIMEOUT)
+    charset = "utf-8"
+    if "charset=" in ctype:
+        charset = ctype.split("charset=", 1)[1].split(";")[0].strip().strip('"') or "utf-8"
+    try:
+        text = body.decode(charset, errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+    title = ""
+    if "html" in ctype or text.lstrip()[:1] == "<":
+        parser = _TextExtractor()
+        parser.feed(text)
+        parser.close()
+        title, text = " ".join(parser.title.split()), "".join(parser.parts)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+    more = "\n[... truncated]" if len(text) > MAX_FETCH_TEXT else ""
+    head = f"{title}\n{url}\n\n" if title else f"{url}\n\n"
+    return head + text[:MAX_FETCH_TEXT] + more
+
+
+def _search_host(a: dict) -> str:
+    base = os.environ.get("SEARXNG_URL") or "https://api.search.brave.com"
+    return urllib.parse.urlparse(base).hostname or ""
+
+
+def _url_host(a: dict) -> str:
+    return urllib.parse.urlparse(str(a.get("url", ""))).hostname or ""
 
 
 def web_tools() -> list[Tool]:
     return [
         Tool(
-            name="web_screenshot",
+            name="web_search",
             description=(
-                "Render a local web page (http://localhost:PORT/...) in a headless browser and return a "
-                "screenshot that you can see. Use it after starting a web server to check how the page "
-                "looks, and after fixing it to verify the change. Only local/private hosts are allowed."
+                "Search the internet and return the top results (title, URL, snippet). Use it for "
+                "current facts, library/API documentation, or error messages. Call web_fetch on a "
+                "result URL to read the page."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "the page to render, e.g. http://localhost:8000/"},
-                    "timeout": {"type": "integer", "description": "seconds to wait for the page (default 15)"},
+                    "query": {"type": "string", "description": "the search query"},
+                    "max_results": {"type": "integer", "description": "1-10, default 5"},
                 },
-                "required": ["url"],
+                "required": ["query"],
             },
-            func=web_screenshot,
-            kind="read",
+            func=web_search,
+            kind="network",
+            target_of=_search_host,
         ),
         Tool(
-            name="web_open",
+            name="web_fetch",
             description=(
-                "Open a local web page in the GUI's browser tab (next to the file viewer) so the user can "
-                "follow along. Does not block."
+                "Download a public web page or text file and return its readable text (HTML is converted "
+                "to plain text). Long pages are truncated."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "the page to open, e.g. http://localhost:8000/"},
+                    "url": {"type": "string", "description": "absolute http(s) URL"},
                 },
                 "required": ["url"],
             },
-            func=web_open,
-            kind="read",
+            func=web_fetch,
+            kind="network",
+            target_of=_url_host,
         ),
     ]

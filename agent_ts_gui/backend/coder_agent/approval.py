@@ -10,6 +10,8 @@ import tomllib
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
+
+from .util import is_local_host
 from typing import Optional
 
 from .paths import project_cache_dir, user_dir
@@ -24,7 +26,7 @@ class Decision:
 
 @dataclass
 class ApprovalRequest:
-    kind: str  # command | write
+    kind: str  # command | write | network | mcp
     tool: str
     title: str
     detail: str  # command line, or unified diff
@@ -424,6 +426,33 @@ class ApprovalPolicy:
             by_scope = True
         return Decision("allow", "inside trusted paths" if by_scope else "all parts match allow rules")
 
+    def check_network(self, host: str) -> Decision:
+        cfg = self.data.get("network", {})
+        host = host.lower()
+        for g in cfg.get("deny", []):
+            if fnmatch.fnmatch(host, g):
+                return Decision("deny", f"matches deny pattern '{g}'")
+        if self.data.get("auto_approve_all") or self.session_approve:
+            return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
+        for g in cfg.get("allow", []):
+            if fnmatch.fnmatch(host, g):
+                return Decision("allow", f"matches allow pattern '{g}'")
+        if cfg.get("local_auto", True) and is_local_host(host):
+            return Decision("allow", "local address")
+        return self._default("network")
+
+    def check_mcp(self, tool_name: str) -> Decision:
+        cfg = self.data.get("mcp", {})
+        for g in cfg.get("deny", []):
+            if fnmatch.fnmatch(tool_name, g):
+                return Decision("deny", f"matches deny pattern '{g}'")
+        if self.data.get("auto_approve_all") or self.session_approve:
+            return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
+        for g in cfg.get("allow", []):
+            if fnmatch.fnmatch(tool_name, g):
+                return Decision("allow", f"matches allow pattern '{g}'")
+        return self._default("mcp")
+
     def check_write(self, rel_path: str) -> Decision:
         cfg = self.data.get("files", {})
         p = rel_path.replace("\\", "/")
@@ -456,6 +485,8 @@ class ApprovalPolicy:
     # --------------------------------------------------------- persistence
     @staticmethod
     def suggest_rule(kind: str, args: dict) -> str:
+        if kind in ("network", "mcp"):
+            return args.get("host", args.get("name", ""))
         if kind == "command":
             segs, _ = split_command(args.get("command", ""))
             toks = (_tokens(segs[-1]) if segs else None) or []
@@ -471,7 +502,7 @@ class ApprovalPolicy:
         if not rule or file is None:
             return None
         raw = _read(file)
-        section = raw.setdefault("commands" if kind == "command" else "files", {})
+        section = raw.setdefault({"command": "commands", "network": "network", "mcp": "mcp"}.get(kind, "files"), {})
         lst = section.setdefault("allow", [])
         if rule not in lst:
             lst.append(rule)

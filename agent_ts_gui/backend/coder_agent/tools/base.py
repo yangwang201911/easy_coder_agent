@@ -30,6 +30,7 @@ class ToolContext:
     max_output_chars: int = 12000
     read_roots: list[Path] = field(default_factory=agent_read_roots)  # extra READ-only locations
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
+    ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -80,6 +81,7 @@ class Tool:
     kind: str = "read"  # read | write | exec
     preview: Optional[Callable[[ToolContext, dict], str]] = None  # diff / detail for approval
     command_of: Optional[Callable[[dict], str]] = None  # exec tools: the command line the approval policy judges
+    target_of: Optional[Callable[[dict], str]] = None  # network tools: the host the approval policy judges
 
     def schema(self) -> dict:
         return {

@@ -16,6 +16,7 @@ from .orchestrator import Orchestrator, Plan, PlanError, PlanResult, Planner, St
 from .prompts import PromptBuilder, PromptSections, TaskTypeRegistry
 from .session import Session, Turn
 from .tools import ToolContext, ToolRegistry, default_registry
+from .tools.mcp_client import McpHub, load_servers
 
 
 def _serialised(approver: Optional[Approver]) -> Optional[Approver]:
@@ -52,6 +53,12 @@ class Engine:
         self.sections = PromptSections()
         self.ctx_mgr = ContextManager(config.context)
         self.registry: ToolRegistry = default_registry()
+        self.mcp = McpHub(load_servers(self.root, self.policy.data))
+        self.mcp_tool_names: list[str] = []
+        for t in self.mcp.start():
+            self.registry.register(t)
+            self.mcp_tool_names.append(t.name)
+        self.asker: Optional[Callable[[dict], Optional[dict]]] = None  # set by the server: asks the user a question
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
         # Steer: the user sends a new message while a turn is running. The agent
@@ -60,6 +67,9 @@ class Engine:
         self._steer_prompt: str = ""
 
     # ------------------------------------------------------------- settings
+    def close(self) -> None:
+        self.mcp.close()
+
     def apply_config(self, config: AppConfig) -> None:
         """Call between runs after the user edited settings."""
         self.config = config
@@ -109,7 +119,7 @@ class Engine:
             self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt, images=turn.images)
 
             provider = self._provider_override or create_provider(self.config)
-            registry = self.registry.subset(tt.tools) if tt.tools else self.registry
+            registry = self.registry.subset([*tt.tools, *self.mcp_tool_names]) if tt.tools else self.registry
             tool_ctx = ToolContext(
                 root=self.root,
                 cancel=self.cancel_event,
@@ -117,6 +127,7 @@ class Engine:
                 snapshots=self.session.snapshots,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
+                ask_user=self.asker,
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,

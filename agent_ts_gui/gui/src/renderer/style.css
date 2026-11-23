@@ -297,7 +297,7 @@ body.resizing-h * { cursor: row-resize !important; }
 #session-chat-view #chat { flex: 1; min-height: 0; }
 /* the input box is a direct child of the sessions tab, so it stays visible
    in both the list view and the chat view */
-#tab-sessions > #input-resize, #tab-sessions > #input-zone { flex: none; }
+#tab-sessions > #input-resize, #tab-sessions > #input-zone, #tab-sessions > #ask-panel { flex: none; }
 
 /* lists */
 .list { list-style: none; margin: 0; padding: 0; }
@@ -951,3 +951,42 @@ fieldset.grp legend { font-weight: bold; padding: 0 6px; }
   border: none;
   font-weight: bold;
 }
+
+/* inline question panel above the input box (approvals and ask_user) */
+#ask-panel {
+  display: flex;
+  flex-direction: column;
+  margin: 0 10px 4px;
+  max-height: 60%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  outline: none;
+}
+#ask-panel:focus-within { border-color: var(--focus); }
+.ap-head { display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.ap-title { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-icon { border: none; background: transparent; color: var(--text-soft); cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+.ap-icon:hover { background: var(--hover); color: var(--text); }
+.ap-body { overflow-y: auto; min-height: 0; padding: 10px 12px; }
+.ap-q { white-space: pre-wrap; margin-bottom: 8px; }
+.ap-detail { margin: 0 0 10px; max-height: 160px; }
+.ap-opt { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.ap-opt:hover { background: var(--hover); }
+.ap-opt.sel { background: var(--hover-strong); }
+.ap-num { width: 12px; color: var(--muted); font-size: 11px; text-align: right; }
+.ap-label { font-weight: 600; }
+.ap-desc { color: var(--text-soft2); }
+.ap-check { margin-left: auto; visibility: hidden; color: var(--text); }
+.ap-opt.sel .ap-check { visibility: visible; }
+.ap-input, .ap-select {
+  border: 1px solid var(--input-border); border-radius: 6px; padding: 4px 8px;
+  background: transparent; color: var(--text); font: inherit;
+}
+.ap-input { flex: 1; min-width: 0; }
+.ap-input:focus, .ap-select:focus { outline: none; border-color: var(--focus); }
+.ap-foot { display: flex; justify-content: flex-end; padding: 6px 10px; border-top: 1px solid var(--border); }
+.ap-submit { background: var(--accent); color: var(--accent-text); border: none; border-radius: 4px; padding: 4px 14px; cursor: pointer; }
+.ap-submit:hover { background: var(--accent-hover); }
+#ask-panel.ap-collapsed .ap-body, #ask-panel.ap-collapsed .ap-foot { display: none; }

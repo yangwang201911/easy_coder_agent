@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from typing import Any
 
@@ -71,3 +72,15 @@ def truncate_middle(text: str, max_chars: int, marker: str = "\n...[{n} chars om
     tail = max_chars - head
     omitted = len(text) - head - tail
     return text[:head] + marker.format(n=omitted) + text[len(text) - tail:]
+
+
+def is_local_host(host: str) -> bool:
+    """Loopback, private, link-local, intranet-style or single-label host."""
+    host = host.lower().strip("[]")
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host == "localhost" or host.endswith((".local", ".lan")) or "." not in host
+    return ip.is_loopback or ip.is_private or ip.is_link_local

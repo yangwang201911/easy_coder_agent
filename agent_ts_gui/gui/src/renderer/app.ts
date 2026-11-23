@@ -1219,35 +1219,197 @@ function diffHtml(text: string): string {
   }).join("\n");
 }
 
-function approvalDialog(req: Record<string, any>): Promise<Record<string, any>> {
+// Inline question panel above the input box (like VS Code Copilot): used for approvals and ask_user.
+interface PanelRow {
+  label: string;
+  desc?: string;
+  input?: { placeholder: string; value?: string; required?: boolean };
+  select?: string[];
+}
+interface PanelResult { index: number; text: string; select: string }
+interface PanelJob {
+  reqId: string;
+  title: string;
+  question: string;
+  detail?: string;
+  rows: PanelRow[];
+  resolve: (r: PanelResult | null | undefined) => void;
+}
+const panelQueue: PanelJob[] = [];
+let panelCur: PanelJob | null = null;
+
+// resolves: PanelResult = submitted, null = dismissed by the user, undefined = stale (turn ended / duplicate)
+function panelEnqueue(job: Omit<PanelJob, "resolve">): Promise<PanelResult | null | undefined> {
+  if (panelCur?.reqId === job.reqId || panelQueue.some((j) => j.reqId === job.reqId)) return Promise.resolve(undefined);
   return new Promise((resolve) => {
-    const modal = $("modal");
-    modal.className = "modal";
-    const what = req.kind === "command" ? "Run command" : "Write file";
-    modal.innerHTML =
-      `<div class="head"></div>` +
-      `<div class="body"><div class="diff"></div>` +
-      `<div class="row"><label>Remember rule:</label><input type="text" class="rule"/><select class="scope"><option>project</option><option>user</option></select></div>` +
-      `<input type="text" class="full feedback" placeholder="Optional feedback sent to the model when rejecting"/>` +
-      `<div class="foot"><button class="reject">Reject</button><button class="allow">Allow once</button><button class="session">Allow all in this session</button><button class="primary remember">Allow && remember rule</button></div>`;
-    modal.querySelector(".head")!.textContent = `${what}: ${req.title ?? ""}`;
-    modal.querySelector(".diff")!.innerHTML = diffHtml(req.detail ?? "");
-    (modal.querySelector(".rule") as HTMLInputElement).value = req.suggested_rule ?? "";
-    (modal.querySelector(".feedback") as HTMLInputElement).value = "";
-    $("modal-backdrop").classList.add("show");
-    const done = (resp: Record<string, any>) => { $("modal-backdrop").classList.remove("show"); resolve(resp); };
-    modal.querySelector(".allow")!.addEventListener("click", () => done({ allow: true }));
-    modal.querySelector(".session")!.addEventListener("click", () => done({ allow: true, session_approve: true }));
-    modal.querySelector(".remember")!.addEventListener("click", () => done({
-      allow: true,
-      remember_rule: (modal.querySelector(".rule") as HTMLInputElement).value.trim(),
-      remember_scope: (modal.querySelector(".scope") as HTMLSelectElement).value,
-    }));
-    modal.querySelector(".reject")!.addEventListener("click", () => done({
-      allow: false,
-      feedback: (modal.querySelector(".feedback") as HTMLInputElement).value.trim(),
-    }));
+    panelQueue.push({ ...job, resolve });
+    if (!panelCur) panelNext();
   });
+}
+
+function panelHide() {
+  const host = $("ask-panel");
+  host.classList.add("hidden");
+  host.classList.remove("ap-collapsed");
+  host.innerHTML = "";
+}
+
+function panelCancelAll() {
+  const cur = panelCur;
+  panelCur = null;
+  cur?.resolve(undefined);
+  panelQueue.splice(0).forEach((j) => j.resolve(undefined));
+  panelHide();
+}
+
+function panelClose(result: PanelResult | null) {
+  const job = panelCur;
+  if (!job) return;
+  panelCur = null;
+  job.resolve(result);
+  panelNext();
+}
+
+function panelNext() {
+  const job = panelQueue.shift();
+  if (!job) { panelCur = null; panelHide(); return; }
+  panelCur = job;
+  switchLeftTab("sessions");
+  const host = $("ask-panel");
+  host.classList.remove("hidden", "ap-collapsed");
+  host.innerHTML =
+    `<div class="ap-head"><span class="ap-title"></span>` +
+    `<button class="ap-icon ap-close" title="Dismiss (Esc)">✕</button>` +
+    `<button class="ap-icon ap-collapse" title="Collapse / expand">⌄</button></div>` +
+    `<div class="ap-body"><div class="ap-q"></div><pre class="diff ap-detail"></pre><div class="ap-opts"></div></div>` +
+    `<div class="ap-foot"><button class="ap-submit">Submit</button></div>`;
+  const title = host.querySelector(".ap-title") as HTMLElement;
+  title.textContent = job.title;
+  title.title = job.title;
+  (host.querySelector(".ap-q") as HTMLElement).textContent = job.question;
+  if (!job.question) host.querySelector(".ap-q")!.remove();
+  const detail = host.querySelector(".ap-detail") as HTMLElement;
+  if (job.detail) detail.innerHTML = job.detail; else detail.remove();
+
+  const optsEl = host.querySelector(".ap-opts") as HTMLElement;
+  const rowEls: HTMLElement[] = [];
+  const inputs: (HTMLInputElement | null)[] = [];
+  const selects: (HTMLSelectElement | null)[] = [];
+  let sel = 0;
+  const paint = () => rowEls.forEach((el, i) => el.classList.toggle("sel", i === sel));
+  const choose = (i: number) => { sel = i; paint(); inputs[i]?.focus(); };
+  job.rows.forEach((row, i) => {
+    const el = document.createElement("div");
+    el.className = "ap-opt";
+    const num = document.createElement("span");
+    num.className = "ap-num";
+    num.textContent = String(i + 1);
+    el.appendChild(num);
+    let input: HTMLInputElement | null = null;
+    let select: HTMLSelectElement | null = null;
+    if (row.label) {
+      const lb = document.createElement("span");
+      lb.className = "ap-label";
+      lb.textContent = row.label;
+      el.appendChild(lb);
+    }
+    if (row.desc) {
+      const d = document.createElement("span");
+      d.className = "ap-desc";
+      d.textContent = row.desc;
+      el.appendChild(d);
+    }
+    if (row.input) {
+      input = document.createElement("input");
+      input.type = "text";
+      input.className = "ap-input";
+      input.placeholder = row.input.placeholder;
+      input.value = row.input.value ?? "";
+      input.addEventListener("focus", () => { sel = i; paint(); });
+      el.appendChild(input);
+    }
+    if (row.select) {
+      select = document.createElement("select");
+      select.className = "ap-select";
+      for (const o of row.select) select.add(new Option(o, o));
+      el.appendChild(select);
+    }
+    const check = document.createElement("span");
+    check.className = "ap-check";
+    check.textContent = "✓";
+    el.appendChild(check);
+    el.addEventListener("click", (e) => { if (e.target === input || e.target === select) return; choose(i); });
+    optsEl.appendChild(el);
+    rowEls.push(el);
+    inputs.push(input);
+    selects.push(select);
+  });
+  paint();
+
+  const submit = () => {
+    const input = inputs[sel];
+    const text = input?.value.trim() ?? "";
+    if (job.rows[sel].input?.required && !text) { input?.focus(); return; }
+    panelClose({ index: sel, text, select: selects[sel]?.value ?? "" });
+  };
+  host.querySelector(".ap-submit")!.addEventListener("click", submit);
+  host.querySelector(".ap-close")!.addEventListener("click", () => panelClose(null));
+  host.querySelector(".ap-collapse")!.addEventListener("click", () => {
+    const collapsed = host.classList.toggle("ap-collapsed");
+    (host.querySelector(".ap-collapse") as HTMLElement).textContent = collapsed ? "⌃" : "⌄";
+  });
+  host.onkeydown = (e) => {
+    const inField = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
+    if (e.key === "Escape") { e.preventDefault(); panelClose(null); }
+    else if (e.key === "Enter" && !(e.target instanceof HTMLSelectElement)) { e.preventDefault(); submit(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); choose(Math.min(sel + 1, rowEls.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); choose(Math.max(sel - 1, 0)); }
+    else if (!inField && /^[1-9]$/.test(e.key) && Number(e.key) <= rowEls.length) { e.preventDefault(); choose(Number(e.key) - 1); }
+  };
+  host.focus();
+}
+
+async function answerQuietly(reqId: string, response: Record<string, any>) {
+  try {
+    await call("answer", { req_id: reqId, response });
+  } catch { /* the turn was cancelled meanwhile: the question no longer exists */ }
+}
+
+async function approvalDialog(req: Record<string, any>): Promise<Record<string, any> | undefined> {
+  const what = req.kind === "command" ? "Run command" : req.kind === "network" ? "Network access"
+    : req.kind === "mcp" ? "MCP tool" : "Write file";
+  const rule = String(req.suggested_rule ?? "");
+  const rows: PanelRow[] = [{ label: "Allow once" }, { label: "Allow all in this session" }];
+  const ruleIdx = rule ? rows.push({
+    label: "Allow & remember rule",
+    input: { placeholder: "rule", value: rule, required: true },
+    select: ["project", "user"],
+  }) - 1 : -1;
+  rows.push({ label: "Reject", input: { placeholder: "Optional feedback sent to the model" } });
+  const r = await panelEnqueue({
+    reqId: String(req.req_id), title: what, question: String(req.title ?? ""), detail: diffHtml(req.detail ?? ""), rows,
+  });
+  if (r === undefined) return undefined;
+  if (r === null) return { allow: false };
+  if (r.index === 0) return { allow: true };
+  if (r.index === 1) return { allow: true, session_approve: true };
+  if (r.index === ruleIdx) return { allow: true, remember_rule: r.text, remember_scope: r.select || "project" };
+  return { allow: false, feedback: r.text };
+}
+
+async function askUserDialog(req: Record<string, any>): Promise<Record<string, any> | undefined> {
+  const options: { label: string; description?: string }[] = Array.isArray(req.options) ? req.options : [];
+  const rows: PanelRow[] = options.map((o) => ({ label: o.label, desc: o.description }));
+  if (req.allow_freeform !== false || !rows.length) {
+    rows.push({ label: "", input: { placeholder: "Enter custom answer", required: true } });
+  }
+  const r = await panelEnqueue({
+    reqId: String(req.req_id), title: String(req.header || "Question"), question: String(req.question ?? ""), rows,
+  });
+  if (r === undefined) return undefined;
+  if (r === null) return { dismissed: true };
+  if (r.index < options.length) return { answer: options[r.index].label, custom: false };
+  return { answer: r.text, custom: true };
 }
 
 function stageDialog(report: Record<string, any>): Promise<string> {
@@ -2081,6 +2243,7 @@ function onEvent(ev: AgentEvent) {
     chat.line(`\n[${k}] ${d.text ?? ""}`, k === "error" ? "c-error" : "c-warn");
     log(ev, d.text ?? "", k === "error" ? "c-error" : "c-warn");
   } else if (k === "turn_finished") {
+    panelCancelAll();
     S.mdBlock?.finish();
     S.mdBlock = null;
     // collapse the tool activity behind the "Completed N steps in Xs" chip
@@ -2142,7 +2305,13 @@ function onEvent(ev: AgentEvent) {
     log(ev, `approval requested: ${d.title ?? d.kind}`, "c-warn");
     void (async () => {
       const resp = await approvalDialog(d);
-      await call("answer", { req_id: d.req_id, response: resp });
+      if (resp) await answerQuietly(d.req_id, resp);
+    })();
+  } else if (k === "ask_user_requested") {
+    log(ev, `question: ${short(d.question ?? "", 120)}`, "c-warn");
+    void (async () => {
+      const resp = await askUserDialog(d);
+      if (resp) await answerQuietly(d.req_id, resp);
     })();
   } else if (k === "plan_review_requested") {
     log(ev, "plan review requested", "c-warn");
