@@ -33,7 +33,9 @@ export interface Api {
   getConnection: () => Promise<Connection>;
   getConnMode: () => Promise<"local" | "remote" | "ssh">;
   setConnection: (c: Connection & { root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
-  sshConnect: (o: { token?: string; root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
+  sshConnect: (o: { host?: SshHost | null; token?: string; root?: string | null }) => Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }>;
+  sshHostsList: () => Promise<{ hosts: SshHost[]; active: string | null }>;
+  sshHostsSave: (o: { hosts: SshHost[]; active?: string | null }) => Promise<{ ok: boolean; error?: string }>;
   getConnError: () => Promise<string>;
   onConnError: (cb: (msg: string) => void) => void;
   winMinimize: () => Promise<void>;
@@ -48,6 +50,10 @@ export interface SshTarget {
   port: number;        // ssh port, 0 = default 22
   identity: string;    // identity file path, "" = ssh agent; password is prompted in a dialog if the server asks
   remotePort: number;  // coder-agent-server port on the remote machine
+}
+
+export interface SshHost extends SshTarget {
+  name: string;        // display name in the Settings > Remote server host list
 }
 
 export interface Connection {

@@ -1,6 +1,6 @@
 // Preload: type-safe bridge between renderer and main.
 import { contextBridge, ipcRenderer } from "electron";
-import type { AgentEvent, ReplyMsg, Connection } from "../types";
+import type { AgentEvent, ReplyMsg, Connection, SshHost } from "../types";
 
 contextBridge.exposeInMainWorld("api", {
   getBackendUrl: (): Promise<string | null> => ipcRenderer.invoke("backend-url"),
@@ -21,7 +21,9 @@ contextBridge.exposeInMainWorld("api", {
   restartBackend: (root: string | null): Promise<void> => ipcRenderer.invoke("restart-backend", root),
   getConnection: (): Promise<Connection> => ipcRenderer.invoke("get-connection"),
   getConnMode: (): Promise<"local" | "remote" | "ssh"> => ipcRenderer.invoke("conn-mode"),
-  sshConnect: (o: { token?: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("ssh-connect", o),
+  sshConnect: (o: { host?: SshHost | null; token?: string; root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("ssh-connect", o),
+  sshHostsList: (): Promise<{ hosts: SshHost[]; active: string | null }> => ipcRenderer.invoke("ssh-hosts-list"),
+  sshHostsSave: (o: { hosts: SshHost[]; active?: string | null }): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("ssh-hosts-save", o),
   getConnError: (): Promise<string> => ipcRenderer.invoke("get-conn-error"),
   onConnError: (cb: (msg: string) => void) => ipcRenderer.on("conn-error", (_e, msg) => cb(msg)),
   setConnection: (c: Connection & { root?: string | null }): Promise<{ ok: boolean; reconnected?: boolean; url?: string; error?: string }> => ipcRenderer.invoke("set-connection", c),

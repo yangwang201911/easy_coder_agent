@@ -4,7 +4,7 @@ import DOMPurify from "dompurify";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { AgentEvent, ReplyMsg } from "../types";
+import type { AgentEvent, ReplyMsg, SshHost } from "../types";
 
 // ------------------------------------------------------ markdown (chat only)
 const md = markdownit({ html: false, linkify: true, breaks: true });
@@ -1803,8 +1803,18 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       `<div class="field"><span class="lbl">port</span><input type="number" class="c-port"/></div>` +
       `</div>` +
       `<div class="c-sshgrp" style="display:none">` +
-      `<div class="field"><span class="lbl">target</span><span class="c-ssh-summary" style="flex:1;min-width:0"></span></div>` +
-      `<div class="tip" style="font-size:11px;color:var(--text-soft2)">Apply &amp; reconnect opens a small window for <b>user@host</b> and then asks for the SSH password.</div>` +
+      `<div class="c-hosts"></div>` +
+      `<div class="btnrow" style="margin-top:4px"><button class="c-host-add">Add host</button><button class="c-host-edit" disabled>Edit</button><button class="c-host-del" disabled>Remove</button></div>` +
+      `<div class="c-host-form" style="display:none">` +
+      `<div class="field"><span class="lbl">name</span><input type="text" class="hf-name" placeholder="e.g. devbox"/></div>` +
+      `<div class="field"><span class="lbl">user</span><input type="text" class="hf-user" placeholder="ywang2"/></div>` +
+      `<div class="field"><span class="lbl">host</span><input type="text" class="hf-host" placeholder="10.112.106.102"/></div>` +
+      `<div class="field"><span class="lbl">ssh port</span><input type="number" class="hf-port" value="22"/></div>` +
+      `<div class="field"><span class="lbl">agent port</span><input type="number" class="hf-rport" value="8931" title="coder-agent-server port on that machine"/></div>` +
+      `<div class="field"><span class="lbl">key file</span><input type="text" class="hf-key" placeholder="optional, empty = ssh agent"/></div>` +
+      `<div class="btnrow"><button class="hf-save primary">Save host</button><button class="hf-cancel">Cancel</button></div>` +
+      `</div>` +
+      `<div class="tip" style="font-size:11px;color:var(--text-soft2)">Select a host, then Apply &amp; reconnect (a password window follows if the server asks). Hosts are saved in this app's user data.</div>` +
       `</div>` +
       `<div class="field"><span class="lbl">token</span><input type="text" class="c-token" placeholder="shared secret (server started with --token)"/></div>` +
       `</fieldset>` +
@@ -1816,15 +1826,97 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       `so the server only needs to listen on loopback (no exposed port, no firewall changes; password or key login). ` +
       `One server serves one GUI; the project paths are on the server machine. ` +
       `The connection is saved in this app's user data and used at next start.</div>`;
+    // ---- ssh host list (named hosts; the selected one is used by Apply & reconnect)
+    let sshHosts: SshHost[] = [];
+    let selHost = ""; // name of the selected host in the list
+    const hostsBox = cPage.querySelector(".c-hosts") as HTMLElement;
+    const hostForm = cPage.querySelector(".c-host-form") as HTMLElement;
+    function hostRow(h: SshHost): string {
+      return `<div class="c-host-row${h.name === selHost ? " sel" : ""}" data-n="${esc(h.name)}">` +
+        `<span class="c-host-name">${esc(h.name)}</span>` +
+        `<span class="c-host-meta">${esc(h.user)}@${esc(h.host)}${h.port !== 22 ? ":" + h.port : ""} &middot; agent port ${h.remotePort}${h.identity ? " &middot; key" : ""}</span></div>`;
+    }
+    function renderHosts() {
+      hostsBox.innerHTML = sshHosts.length
+        ? sshHosts.map(hostRow).join("")
+        : `<div class="c-host-row muted" style="cursor:default">no hosts yet &mdash; click "Add host"</div>`;
+      (cPage.querySelector(".c-host-edit") as HTMLButtonElement).disabled = !selHost;
+      (cPage.querySelector(".c-host-del") as HTMLButtonElement).disabled = !selHost;
+    }
+    function fillHostForm(h: SshHost | null) {
+      (cPage.querySelector(".hf-name") as HTMLInputElement).value = h?.name ?? "";
+      (cPage.querySelector(".hf-user") as HTMLInputElement).value = h?.user ?? "";
+      (cPage.querySelector(".hf-host") as HTMLInputElement).value = h?.host ?? "";
+      (cPage.querySelector(".hf-port") as HTMLInputElement).value = String(h?.port ?? 22);
+      (cPage.querySelector(".hf-rport") as HTMLInputElement).value = String(h?.remotePort ?? 8931);
+      (cPage.querySelector(".hf-key") as HTMLInputElement).value = h?.identity ?? "";
+    }
+    async function persistHosts(): Promise<boolean> {
+      const r = await window.api.sshHostsSave({ hosts: sshHosts, active: selHost || null });
+      if (!r.ok) { showMsg(cPage, false, String(r.error)); return false; }
+      return true;
+    }
+    let editingName = ""; // "" = adding a new host
+    cPage.querySelector(".c-host-add")!.addEventListener("click", () => {
+      editingName = "";
+      fillHostForm(null);
+      hostForm.style.display = "";
+    });
+    cPage.querySelector(".hf-cancel")!.addEventListener("click", () => { hostForm.style.display = "none"; });
+    cPage.querySelector(".hf-save")!.addEventListener("click", async () => {
+      const name = (cPage.querySelector(".hf-name") as HTMLInputElement).value.trim() || "host";
+      const user = (cPage.querySelector(".hf-user") as HTMLInputElement).value.trim();
+      const host = (cPage.querySelector(".hf-host") as HTMLInputElement).value.trim();
+      if (!user || !host) { showMsg(cPage, false, "user and host are required"); return; }
+      const h: SshHost = { name, user, host,
+        port: Number((cPage.querySelector(".hf-port") as HTMLInputElement).value) || 22,
+        remotePort: Number((cPage.querySelector(".hf-rport") as HTMLInputElement).value) || 8931,
+        identity: (cPage.querySelector(".hf-key") as HTMLInputElement).value.trim() };
+      const i = sshHosts.findIndex((x) => x.name === editingName);
+      if (i >= 0) {
+        if (sshHosts.some((x) => x.name === name && x.name !== editingName)) { showMsg(cPage, false, "a host with this name already exists"); return; }
+        sshHosts[i] = h;
+      } else {
+        if (sshHosts.some((x) => x.name === name)) { showMsg(cPage, false, "a host with this name already exists"); return; }
+        sshHosts.push(h);
+      }
+      selHost = name;
+      hostForm.style.display = "none";
+      if (!(await persistHosts())) return;
+      renderHosts();
+    });
+    cPage.querySelector(".c-host-edit")!.addEventListener("click", () => {
+      const h = sshHosts.find((x) => x.name === selHost);
+      if (!h) return;
+      editingName = h.name;
+      fillHostForm(h);
+      hostForm.style.display = "";
+    });
+    cPage.querySelector(".c-host-del")!.addEventListener("click", async () => {
+      const h = sshHosts.find((x) => x.name === selHost);
+      if (!h) return;
+      if (!confirm(`Remove host "${h.name}"?`)) return;
+      sshHosts = sshHosts.filter((x) => x.name !== selHost);
+      selHost = "";
+      if (!(await persistHosts())) return;
+      renderHosts();
+    });
+    hostsBox.addEventListener("click", (e) => {
+      const row = (e.target as HTMLElement).closest(".c-host-row") as HTMLElement | null;
+      if (!row || !row.dataset.n) return;
+      selHost = row.dataset.n;
+      renderHosts();
+    });
     void (async () => {
       const c = await window.api.getConnection();
       (cPage.querySelector(".c-mode") as HTMLSelectElement).value = c.mode;
       (cPage.querySelector(".c-host") as HTMLInputElement).value = c.host;
       (cPage.querySelector(".c-port") as HTMLInputElement).value = String(c.port);
       (cPage.querySelector(".c-token") as HTMLInputElement).value = c.token;
-      (cPage.querySelector(".c-ssh-summary") as HTMLElement).textContent = c.ssh
-        ? `${c.ssh.user}@${c.ssh.host}${c.ssh.port !== 22 ? ":" + c.ssh.port : ""} (agent server port ${c.ssh.remotePort})`
-        : "not set";
+      const l = await window.api.sshHostsList();
+      sshHosts = l.hosts;
+      selHost = l.active ?? "";
+      renderHosts();
       syncConnFields(cPage);
     })();
     // show/hide the direct host:port vs ssh target fields per mode
@@ -1845,8 +1937,11 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       m.className = "msg"; m.textContent = "Reconnecting...";
       const mode = (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote" | "ssh";
       if (mode === "ssh") {
-        m.textContent = "Enter the SSH login in the window that opened (a password window follows)...";
+        const sel = sshHosts.find((x) => x.name === selHost);
+        if (!sel) { showMsg(cPage, false, "Select an SSH host first (Add host, then click it in the list)."); return; }
+        m.textContent = "Connecting (a password window follows if the server asks)...";
         const sr = await window.api.sshConnect({
+          host: sel,
           token: (cPage.querySelector(".c-token") as HTMLInputElement).value,
           root: S.root,
         });

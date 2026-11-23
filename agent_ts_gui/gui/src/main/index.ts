@@ -6,7 +6,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import WebSocket from "ws";
 import { backendUrlFromLine } from "./backend-output";
-import { openTunnel, parseSshTarget, SshInteractionRequired, Tunnel } from "./ssh-tunnel";
+import { openTunnel, SshInteractionRequired, Tunnel } from "./ssh-tunnel";
 import { showPrompt } from "./prompt-window";
 
 // Backend location: in dev the repo's backend/ dir + its venv python; in a
@@ -51,12 +51,24 @@ const rememberedPasswords = new Map<string, string>(); // session cache (per tar
 // (ssh -N -L localPort:127.0.0.1:remotePort user@host) and connects to the
 // local port; the server only needs to listen on loopback on the remote box.
 interface SshTarget { host: string; user: string; port: number; identity: string; remotePort: number; }
+interface SshHost extends SshTarget { name: string; }
 interface Connection { mode: "local" | "remote" | "ssh"; host: string; port: number; token: string; ssh?: SshTarget; }
 const DEFAULT_CONN: Connection = { mode: "local", host: "127.0.0.1", port: 8931, token: "" };
 let conn: Connection = { ...DEFAULT_CONN };
+// Named SSH hosts managed in Settings > Remote server; conn.ssh is the currently
+// selected one (used at startup / for Apply & reconnect).
+let sshHosts: SshHost[] = [];
 
 function connFile(): string {
   return path.join(app.getPath("userData"), "connection.json");
+}
+function normSshHost(h: any): SshHost | null {
+  if (!h || typeof h !== "object") return null;
+  const host = String(h.host || ""), user = String(h.user || "");
+  if (!host || !user) return null;
+  return { name: String(h.name || `${user}@${host}`), host, user,
+    port: Number(h.port) || 22, identity: String(h.identity || ""),
+    remotePort: Number(h.remotePort) || 8931 };
 }
 function loadConn(): Connection {
   try {
@@ -70,6 +82,14 @@ function loadConn(): Connection {
           port: Number(c.ssh.port) || 22, identity: String(c.ssh.identity || ""),
           remotePort: Number(c.ssh.remotePort) || 8931 };
       }
+      // named host list (new format); migrate the old single conn.ssh into it
+      sshHosts = Array.isArray(c.ssh_hosts)
+        ? c.ssh_hosts.map(normSshHost).filter((h): h is SshHost => !!h)
+        : [];
+      if (mode === "ssh" && conn.ssh && !sshHosts.some((h) =>
+          h.host === conn.ssh!.host && h.user === conn.ssh!.user && h.port === conn.ssh!.port)) {
+        sshHosts.push({ name: `${conn.ssh.user}@${conn.ssh.host}`, ...conn.ssh });
+      }
       return conn;
     }
   } catch { /* ignore */ }
@@ -77,7 +97,16 @@ function loadConn(): Connection {
 }
 function saveConn(c: Connection) {
   conn = c;
-  try { fs.writeFileSync(connFile(), JSON.stringify(c, null, 2)); } catch { /* ignore */ }
+  try { fs.writeFileSync(connFile(), JSON.stringify({ ...c, ssh_hosts: sshHosts }, null, 2)); } catch { /* ignore */ }
+}
+function saveSshHosts(hosts: SshHost[], activeName?: string | null) {
+  sshHosts = hosts;
+  // keep conn.ssh pointing at the selected host (only meaningful in ssh mode)
+  if (conn.mode === "ssh" && activeName) {
+    const h = sshHosts.find((x) => x.name === activeName);
+    if (h) conn = { ...conn, ssh: { host: h.host, user: h.user, port: h.port, identity: h.identity, remotePort: h.remotePort } };
+  }
+  try { fs.writeFileSync(connFile(), JSON.stringify({ ...conn, ssh_hosts: sshHosts }, null, 2)); } catch { /* ignore */ }
 }
 
 // ------------------------------------------------------------- backend proc
@@ -529,29 +558,26 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("get-connection", () => conn);
   ipcMain.handle("get-conn-error", () => lastConnError);
-  // "Connect via SSH": ask for user@host in a small window, then connect (the password window follows)
-  ipcMain.handle("ssh-connect", async (_e, o: { token?: string; root?: string | null }) => {
-    const cur = conn.ssh;
-    const v = await showPrompt(parentWindow(), {
-      title: "Connect via SSH",
-      message: "Enter the SSH login of the machine that runs the coder agent server.",
-      okLabel: "Next",
-      fields: [
-        { id: "target", label: "SSH target", placeholder: "user@host   e.g. ywang2@10.112.106.102",
-          value: cur ? `${cur.user}@${cur.host}${cur.port && cur.port !== 22 ? ":" + cur.port : ""}` : "" },
-        { id: "remotePort", label: "Agent server port on that machine", value: String(cur?.remotePort ?? 8931), advanced: true },
-        { id: "identity", label: "Private key file", value: cur?.identity ?? "", optional: true, advanced: true },
-      ],
-    });
-    if (!v) return { ok: false, error: "cancelled" };
-    const parsed = parseSshTarget(v.target);
-    if ("error" in parsed) return { ok: false, error: parsed.error };
+  // named SSH hosts managed in Settings > Remote server (list + selected host)
+  ipcMain.handle("ssh-hosts-list", () => ({ hosts: sshHosts, active: conn.ssh ? conn.ssh.host : null }));
+  ipcMain.handle("ssh-hosts-save", (_e, o: { hosts: any[]; active?: string | null }) => {
+    const hosts = (Array.isArray(o?.hosts) ? o.hosts : []).map(normSshHost).filter((h): h is SshHost => !!h);
+    const active = typeof o?.active === "string" ? o.active : null;
+    if (active && !hosts.some((h) => h.name === active)) return { ok: false, error: "active host not found" };
+    saveSshHosts(hosts, active);
+    return { ok: true };
+  });
+  // "Apply & reconnect" in ssh mode: connect to the host selected in Settings
+  // (the password window follows if the server asks for one)
+  ipcMain.handle("ssh-connect", async (_e, o: { host?: any; token?: string; root?: string | null }) => {
+    const t = normSshHost(o?.host);
+    if (!t) return { ok: false, error: "no SSH host selected (add one in Settings > Remote server)" };
     reconnecting = true;
     setTimeout(() => { reconnecting = false; }, 15000);
     lastConnError = "";
     return doSetConnection({
       mode: "ssh", host: conn.host, port: conn.port, token: o?.token ?? conn.token, root: o?.root, force: true,
-      ssh: { host: parsed.host, user: parsed.user, port: parsed.port, identity: v.identity ?? "", remotePort: Number(v.remotePort) || 8931 },
+      ssh: { host: t.host, user: t.user, port: t.port, identity: t.identity, remotePort: t.remotePort },
     });
   });
   ipcMain.handle("conn-mode", () => conn.mode);
