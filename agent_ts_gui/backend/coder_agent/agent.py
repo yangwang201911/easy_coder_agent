@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -18,6 +20,7 @@ from .llm import LLMCancelled, LLMError, LLMProvider, ToolCall, extract_text_too
 from .llm.prompt_dump import set_agent_id
 from .llm.server_info import probe_vision
 from .tools.base import ToolContext, ToolOutput, ToolRegistry
+from .tools.interact import todo_block
 from .util import truncate_middle
 
 Approver = Callable[[ApprovalRequest], ApprovalResponse]
@@ -154,6 +157,8 @@ class Agent:
                 usage = ch.usage
             elif ch.kind == "done":
                 finish = ch.finish_reason
+            elif ch.kind == "status":
+                self._emit("warning", text=ch.text)
         return "".join(content), calls, finish, usage, time.time() - start, ttft
 
     # ------------------------------------------------------------- tool exec
@@ -320,12 +325,16 @@ class Agent:
                 self._emit("status", state="waiting_model", detail=f"step {step}")
 
                 est_raw = self.ctx_mgr.counter.count_raw(messages, self._tools)
+                # Ephemeral per-step reminder: the current todo checklist (not persisted,
+                # appended at the end where the model attends most).
+                todo = todo_block(self.tool_ctx.todos)
+                view = (messages + [{"role": "user", "content": todo}]) if todo else messages
                 try:
                     try:
-                        text, calls, finish, usage, elapsed, ttft = self._call_llm(messages, None)
+                        text, calls, finish, usage, elapsed, ttft = self._call_llm(view, None)
                     except _ThinkLimit:
                         self._emit("warning", text="thinking too long - retrying with thinking disabled")
-                        text, calls, finish, usage, elapsed, ttft = self._call_llm(messages, False)
+                        text, calls, finish, usage, elapsed, ttft = self._call_llm(view, False)
                     except LLMCancelled:
                         # the stream was aborted by a steer (cancel is checked at the
                         # top of the step): the steer message is injected next step
@@ -371,22 +380,45 @@ class Agent:
                     self._emit("agent_finished", status="done", steps=step)
                     return AgentResult("done", text, step)
 
+                # Split the batch: read-only tools run in parallel (they cannot
+                # interfere with each other), everything else runs one by one in
+                # the original order. Results are appended in call order.
+                def _kind_of(tc: ToolCall) -> str:
+                    t = self.registry.get(tc.name)
+                    return t.kind if t is not None else "exec"  # unknown tools stay serial
+
+                parallel = [tc for tc in calls if _kind_of(tc) == "read"]
+                serial = [tc for tc in calls if tc not in parallel]
+                results: dict[str, tuple[str, list[dict]]] = {}
+                if len(parallel) > 1:
+                    with ThreadPoolExecutor(max_workers=min(8, len(parallel)), thread_name_prefix="tool") as pool:
+                        futs = {pool.submit(self._run_tool, tc): tc for tc in parallel}
+                        for fut in futs:
+                            tc = futs[fut]
+                            results[tc.id] = fut.result()
+                else:
+                    for tc in parallel:  # 0 or 1 read tool: run it inline
+                        results[tc.id] = self._run_tool(tc)
+                for tc in serial:
+                    results[tc.id] = self._run_tool(tc)
                 for tc in calls:
                     if self.cancel.is_set():
                         add({"role": "tool", "tool_call_id": tc.id, "content": "Cancelled by the user before running."})
                         continue
                     key = tc.name + "|" + tc.arguments
                     seen[key] = seen.get(key, 0) + 1
-                    if seen[key] > self.cfg.loop_limit:
+                    near = [k for k in seen if k != key and k.startswith(tc.name + "|")
+                            and difflib.SequenceMatcher(None, k, key).ratio() > 0.85]
+                    if seen[key] > self.cfg.loop_limit or (near and seen[key] > 1):
                         strikes += 1
                         result = (
-                            "ERROR: you already made this exact call several times with the same result. "
-                            "Stop repeating it: try a different approach or finish with what you have."
+                            "ERROR: you already made this call (or a nearly identical one) several times with "
+                            "the same result. Stop repeating it: try a different approach or finish with what you have."
                         )
                         self._emit("warning", text=f"repeated call to {tc.name}")
                         images = []
                     else:
-                        result, images = self._run_tool(tc)
+                        result, images = results[tc.id]
                     if images and not self._images_supported():
                         result += "\n[image omitted: the configured model is text-only]"
                         images = []

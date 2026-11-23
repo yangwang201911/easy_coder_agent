@@ -90,6 +90,33 @@ def test_ask_user_tool(ctx):
     assert "dismissed" in ask_user(ctx, {"question": "q", "options": ["x"], "allow_freeform": False})
 
 
+def test_update_todo_tool(ctx):
+    from coder_agent.tools.interact import todo_block, update_todo
+
+    with pytest.raises(ToolError, match="todos is empty"):
+        update_todo(ctx, {"todos": []})
+    events = []
+    ctx.emit = lambda kind, data: events.append((kind, data))
+    out = update_todo(ctx, {"todos": [
+        "step one",
+        {"content": "  step two  ", "status": "in_progress"},
+        {"content": "step three", "status": "done"},
+        {"content": "bad", "status": "nope"},
+        5,
+    ]})
+    assert "1/4 done" in out and "[x] step three" in out and "[~] step two" in out
+    assert ctx.todos == [
+        {"content": "step one", "status": "pending"},
+        {"content": "step two", "status": "in_progress"},
+        {"content": "step three", "status": "done"},
+        {"content": "bad", "status": "pending"},
+    ]
+    assert events[0][0] == "todo_updated"
+    assert "All items are done" in update_todo(ctx, {"todos": [{"content": "a", "status": "done"}]})
+    assert "Current todo list" in todo_block(ctx.todos) and "finish with the final answer" in todo_block(ctx.todos)
+    assert todo_block([]) == ""
+
+
 def test_network_and_mcp_approval_defaults():
     policy = ApprovalPolicy({"network": {"default": "ask", "allow": ["*.docs.example"]}, "mcp": {"allow": ["mcp__fs__read_*"]}})
     assert policy.check_network("127.0.0.1").action == "allow"

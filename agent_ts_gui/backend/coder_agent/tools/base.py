@@ -31,6 +31,7 @@ class ToolContext:
     read_roots: list[Path] = field(default_factory=agent_read_roots)  # extra READ-only locations
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
     ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
+    todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
