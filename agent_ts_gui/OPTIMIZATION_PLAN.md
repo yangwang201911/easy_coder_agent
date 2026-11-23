@@ -17,8 +17,8 @@
 | 8 | 系统提示注入动态环境信息 | 中 | ✅ | `prompts/builder.py` |
 | 9 | web_search 免 key fallback（DuckDuckGo） | 低 | ✅ | `tools/web.py` |
 | 10 | 循环检测模糊化（相似参数） | 低 | ✅ | `agent.py` 主循环 |
-| 11 | orchestrator 并行波次显式标记 | 低 | ⬜ | `orchestrator/orchestrator.py` |
-| 12 | 工具结果缓存（同 turn 重复读取） | 低 | ⬜ | `tools/base.py` |
+| 11 | orchestrator 并行波次显式标记 | 低 | ✅ | `orchestrator/` |
+| 12 | 工具结果缓存（同 turn 重复读取） | 低 | ✅ | `tools/base.py` + `fs.py` |
 
 ## 各项细节与实现方案
 
@@ -90,6 +90,7 @@
   `result__a`/`result__snippet`，解包 `/l/?uddg=` 重定向）作为第三级 fallback；
   无结果时返回友好消息而非报错。
 - **验证**：`test_search_ddg_fallback`（mock `_http_get`，覆盖重定向解包/无结果）。
+  注：本机公司代理拦截 duckduckgo.com，真实端点未能在线验证（mock 覆盖解析逻辑）。
 
 ### 10. 循环检测模糊化 ✅
 - **问题**：只检测参数逐字相同的重复调用，抓不住"换个路径再试一次"的打转。
@@ -97,13 +98,21 @@
   错误信息提示"nearly identical"。
 - **验证**：backend 全绿。
 
-### 11. orchestrator 并行波次 ⬜
+### 11. orchestrator 并行波次 ✅
 - **问题**：按文件 hint 猜并行，hint 缺失时全部串行。
-- **方案**：planner 显式输出 `parallel_safe` 标记。
+- **实现**：`SubTask.parallel_safe`（默认 True，planner 可输出 False）；
+  planner prompt 说明何时标 False（整库构建、改共享配置等）；
+  `_waves` 对 `parallel_safe=False` 的子任务单独成波且锁定（后续不并入）。
+- **验证**：`test_waves_parallel_safe`（文件冲突/单个 unsafe/多个 unsafe/默认值）。
 
-### 12. 工具结果缓存 ⬜
+### 12. 工具结果缓存 ✅
 - **问题**：同 turn 重复 `read_file` 同一段重复消耗 token。
-- **方案**：`(path, mtime, range)` → 结果缓存，命中返回 "(unchanged, see earlier read)"。
+- **实现**：`Tool.cacheable` 标记（目前仅 `read_file`）；`ToolRegistry.execute` 按
+  `(tool, 规范化参数, 目标文件 mtime)` 缓存到 `ToolContext.turn_ctx`（每 turn 新建，
+  自动失效）；命中时返回 "[unchanged since your earlier ...]" 提示，文件改动后
+  （mtime 变化）自动返回完整内容。
+- **验证**：`test_read_file_turn_cache`（重复读/不同 range/文件改动/新 turn）；
+  backend 27 passed。
 
 ## 日志
 
@@ -122,4 +131,11 @@
 - 2026-11-23：#7（turn 结束后台自动提取记忆，memory_saved 事件）完成。
   验证：backend 24 passed。已提交 893075e。
 - 2026-11-23：#8（系统提示注入 # Environment：时间/OS/git 分支）完成。
-  验证：backend 25 passed。
+  验证：backend 25 passed。已提交 902ae39。
+- 2026-11-23：#9（web_search 免 key DuckDuckGo fallback）完成。
+  验证：backend 26 passed。已提交 38ae096。
+- 2026-11-23：#11（orchestrator parallel_safe 显式并行波次）完成。
+  验证：test_waves_parallel_safe 通过。已提交 c035dd9。
+- 2026-11-23：#12（同 turn 重复 read_file 结果缓存）完成。
+  验证：test_read_file_turn_cache 通过；backend 27 passed。已提交 3500834。
+- 2026-11-23：12 项优化全部完成，backend 27 passed。
