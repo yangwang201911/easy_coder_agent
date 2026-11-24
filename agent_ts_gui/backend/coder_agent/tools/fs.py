@@ -18,15 +18,48 @@ IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".agent"
 MAX_READ_LINES = 500
 MAX_FILE_BYTES = 2_000_000
 HAS_RG = shutil.which("rg") is not None
+HAS_CTAGS = shutil.which("ctags") is not None
 MAX_GREP_MATCHES = 100
 MAX_GREP_CONTEXT = 10
 
+# grep_search type= : language -> file extensions (rg has its own --type, we map ourselves)
+GREP_TYPES = {
+    "py": [".py"], "python": [".py"],
+    "cpp": [".cpp", ".cc", ".cxx", ".hpp", ".h", ".hh"], "c": [".c", ".h"],
+    "ts": [".ts", ".tsx"], "javascript": [".js", ".jsx", ".mjs", ".cjs"], "js": [".js", ".jsx"],
+    "json": [".json"], "toml": [".toml"], "md": [".md"], "sh": [".sh", ".bash"],
+    "cmake": ["cmakelists.txt"],
+}
 
-def _walk(root: Path):
+
+def _is_git_repo(root: Path) -> bool:
+    return (root / ".git").exists()
+
+
+def _git_files(root: Path) -> Optional[set[Path]]:
+    """Tracked + untracked-but-not-ignored files (honours .gitignore). None if git fails."""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=str(root), capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        return {root / line for line in out.stdout.splitlines() if line}
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _walk(root: Path, gitignore: bool = True):
+    """Files under root. In a git repo, .gitignore is honoured (via git ls-files);
+    elsewhere the fixed IGNORED_DIRS set applies."""
+    git_files = _git_files(root) if (gitignore and _is_git_repo(root)) else None
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS and d != ".git")
         for f in sorted(filenames):
-            yield Path(dirpath) / f
+            p = Path(dirpath) / f
+            if git_files is not None and p not in git_files:
+                continue
+            yield p
 
 
 def _read_text(path: Path) -> str:
@@ -175,19 +208,118 @@ def find_files(ctx: ToolContext, a: dict) -> str:
 
 
 # --------------------------------------------------------------- grep_search
+def _grep_files(ctx: ToolContext, base: Path, glob: Optional[str],
+                type_name: Optional[str]) -> list[Path]:
+    """Candidate files: a single file, or the walk (gitignore-aware) filtered by glob/type."""
+    if base.is_file():
+        return [base]
+    exts = GREP_TYPES.get((type_name or "").lower())
+    out: list[Path] = []
+    for f in _walk(base):
+        if glob and not (fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(ctx.rel(f), glob)):
+            continue
+        if exts and f.suffix.lower() not in exts and not (
+                type_name == "cmake" and f.name.lower() == "cmakelists.txt"):
+            continue
+        out.append(f)
+    return out
+
+
+def _grep_py(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool,
+             case_sensitive: bool, glob: Optional[str], context_lines: int,
+             type_name: Optional[str], output_mode: str, multiline: bool,
+             offset: int, head_limit: Optional[int]) -> str:
+    """Pure-Python scan (always works; the ripgrep fast path shares the same interface)."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        rx = re.compile(pattern if is_regex else re.escape(pattern), flags | (re.DOTALL if multiline else 0))
+    except re.error as e:
+        raise ToolError(f"invalid regex: {e}")
+    limit = max(1, head_limit) if head_limit else MAX_GREP_MATCHES
+    # (file, line_no, line_text, is_match) tuples, in file/line order
+    hits: list[tuple[Path, int, str, bool]] = []
+    per_file: dict[str, int] = {}
+    for f in _grep_files(ctx, base, glob, type_name):
+        try:
+            if f.stat().st_size > MAX_FILE_BYTES:
+                continue
+            data = f.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in data[:4096]:
+            continue
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if multiline:
+            for m in rx.finditer(text):
+                n = text.count("\n", 0, m.start()) + 1
+                hits.append((f, n, m.group(0).replace("\n", " ⏎ ")[:300], True))
+                if len(hits) >= limit * 4:
+                    break
+        else:
+            for n, line in enumerate(lines, 1):
+                if rx.search(line):
+                    hits.append((f, n, line.strip()[:200], True))
+                    if len(hits) >= limit * 4:
+                        break
+        if len(hits) >= limit * 4:
+            break
+    matches = [h for h in hits if h[3]]
+    total = len(matches)
+    if not matches:
+        return "(no matches)"
+    if output_mode == "files_with_matches":
+        files = list(dict.fromkeys(h[0] for h in matches))
+        return "\n".join(ctx.rel(f) for f in files[:200]) + (f"\n...({total} matches in more files)" if len(files) > 200 else "")
+    if output_mode == "count":
+        for h in matches:
+            per_file[ctx.rel(h[0])] = per_file.get(ctx.rel(h[0]), 0) + 1
+        return "\n".join(f"{n}\t{p}" for p, n in sorted(per_file.items()))
+    # content mode: offset/limit apply to matches, context lines expand around them
+    sel = matches[offset:offset + limit]
+    out: list[str] = []
+    for f, n, line, _ in sel:
+        out.append(f"{ctx.rel(f)}:{n}: {line}")
+        if context_lines:
+            try:
+                body = _read_text(f).splitlines()
+            except ToolError:
+                continue
+            for i in range(max(1, n - context_lines), n):
+                out.append(f"{ctx.rel(f)}:{i}- {body[i - 1].strip()[:200]}")
+            for i in range(n + 1, min(len(body), n + context_lines) + 1):
+                out.append(f"{ctx.rel(f)}:{i}- {body[i - 1].strip()[:200]}")
+    more = f"\n...({total - offset - len(sel)} more matches; use offset={offset + limit})" if total > offset + len(sel) else ""
+    return "\n".join(out) + more
+
+
 def _grep_rg(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool,
-             case_sensitive: bool, glob: Optional[str], context_lines: int) -> str:
+             case_sensitive: bool, glob: Optional[str], context_lines: int,
+             type_name: Optional[str], output_mode: str, multiline: bool,
+             offset: int, head_limit: Optional[int]) -> str:
     """Fast path: system ripgrep (honours .gitignore, skips binaries, parallel)."""
-    cmd = ["rg", "--line-number", "--color", "never", "--max-count", "500",
-           "--no-heading"]
+    limit = max(1, head_limit) if head_limit else MAX_GREP_MATCHES
+    cmd = ["rg", "--line-number", "--color", "never", "--no-heading"]
     if not is_regex:
         cmd.append("--fixed-strings")
     if not case_sensitive:
         cmd.append("-i")
+    if multiline:
+        cmd += ["--multiline", "--dotall"]
     if context_lines:
-        cmd += ["-C", str(context_lines)]
+        cmd += ["-A", str(context_lines)]
     if glob:
         cmd += ["--glob", glob]
+    if type_name:
+        exts = GREP_TYPES.get(type_name.lower())
+        if exts:
+            cmd += ["--glob", f"*{exts[0]}"]  # first extension only; keep it simple
+    if output_mode == "files_with_matches":
+        cmd.append("-l")
+    elif output_mode == "count":
+        cmd.append("-c")
+    else:
+        cmd += ["--max-count", str(limit + offset)]
     search_path = base if base == ctx.root else ctx.rel(base)
     cmd += ["--", pattern, search_path]
     try:
@@ -197,50 +329,10 @@ def _grep_rg(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool
         raise ToolError(f"ripgrep failed: {e}")
     if proc.returncode not in (0, 1):  # 1 = no matches
         raise ToolError(f"ripgrep failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
-    lines = proc.stdout.splitlines()
-    out: list[str] = []
-    for ln in lines:
-        if not ln.strip():
-            continue
-        out.append(ln)
-        if len(out) >= MAX_GREP_MATCHES * (1 + 2 * max(0, context_lines)):
-            break
-    return "\n".join(out) if out else "(no matches)"
-
-
-def _grep_py(ctx: ToolContext, a: dict, base: Path, pattern: str, is_regex: bool,
-             case_sensitive: bool, glob: Optional[str], context_lines: int) -> str:
-    """Fallback: pure-Python scan (no ripgrep installed)."""
-    flags = 0 if case_sensitive else re.IGNORECASE
-    try:
-        rx = re.compile(pattern if is_regex else re.escape(pattern), flags)
-    except re.error as e:
-        raise ToolError(f"invalid regex: {e}")
-    files = [base] if base.is_file() else _walk(base)
-    hits: list[str] = []
-    for f in files:
-        if glob and not (fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(ctx.rel(f), glob)):
-            continue
-        try:
-            if f.stat().st_size > MAX_FILE_BYTES:
-                continue
-            data = f.read_bytes()
-        except OSError:
-            continue
-        if b"\x00" in data[:4096]:
-            continue
-        lines = data.decode("utf-8", errors="replace").splitlines()
-        for n, line in enumerate(lines, 1):
-            if rx.search(line):
-                lo, hi = max(1, n - context_lines), min(len(lines), n + context_lines)
-                for i in range(lo, hi + 1):
-                    mark = ":" if i == n else "-"
-                    hits.append(f"{ctx.rel(f)}:{i}{mark} {lines[i - 1].strip()[:200]}")
-                if context_lines and hi < len(lines):
-                    hits.append("--")
-                if len(hits) >= MAX_GREP_MATCHES * (1 + 2 * context_lines):
-                    return "\n".join(hits) + f"\n...(truncated at {MAX_GREP_MATCHES} matches)"
-    return "\n".join(hits) if hits else "(no matches)"
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if output_mode == "content" and offset:
+        lines = lines[offset:]
+    return "\n".join(lines) if lines else "(no matches)"
 
 
 def grep_search(ctx: ToolContext, a: dict) -> str:
@@ -248,11 +340,16 @@ def grep_search(ctx: ToolContext, a: dict) -> str:
     base = ctx.resolve(a.get("path", "."))
     is_regex = bool(a.get("is_regex", False))
     context_lines = max(0, min(int(a.get("context_lines", 0)), MAX_GREP_CONTEXT))
+    common = dict(is_regex=is_regex, case_sensitive=bool(a.get("case_sensitive", False)),
+                  glob=a.get("glob"), context_lines=context_lines,
+                  type_name=a.get("type"),
+                  output_mode=a.get("output_mode", "content"),
+                  multiline=bool(a.get("multiline", False)),
+                  offset=max(0, int(a.get("offset", 0))),
+                  head_limit=a.get("head_limit"))
     if HAS_RG:
-        return _grep_rg(ctx, a, base, pattern, is_regex, bool(a.get("case_sensitive", False)),
-                        a.get("glob"), context_lines)
-    return _grep_py(ctx, a, base, pattern, is_regex, bool(a.get("case_sensitive", False)),
-                    a.get("glob"), context_lines)
+        return _grep_rg(ctx, a, base, pattern, **common)
+    return _grep_py(ctx, a, base, pattern, **common)
 
 
 # --------------------------------------------------------------- write_file
@@ -433,7 +530,10 @@ def fs_tools() -> list[Tool]:
         ),
         Tool(
             "grep_search",
-            "Search file contents. Case-insensitive plain text by default.",
+            "Search file contents. Case-insensitive plain text by default. "
+            "output_mode: content (default, file:line: text) | files_with_matches | count. "
+            "type filters by language (py, cpp, c, ts, js, json, toml, md, sh, cmake). "
+            "multiline matches across line breaks (regex). offset/head_limit page through many matches.",
             {
                 "type": "object",
                 "properties": {
@@ -442,7 +542,12 @@ def fs_tools() -> list[Tool]:
                     "glob": {"type": "string", "description": "only files matching, e.g. '*.hpp'"},
                     "is_regex": {"type": "boolean"},
                     "case_sensitive": {"type": "boolean"},
-                    "context_lines": {"type": "integer", "description": f"lines of context around each match, 0-{MAX_GREP_CONTEXT}"},
+                    "context_lines": {"type": "integer", "description": f"lines after each match, 0-{MAX_GREP_CONTEXT}"},
+                    "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"]},
+                    "type": {"type": "string", "description": "language filter: py, cpp, c, ts, js, json, toml, md, sh, cmake"},
+                    "multiline": {"type": "boolean", "description": "regex may span line breaks"},
+                    "offset": {"type": "integer", "description": "skip the first N matches"},
+                    "head_limit": {"type": "integer", "description": "max matches to return (default 100)"},
                 },
                 "required": ["pattern"],
             },
