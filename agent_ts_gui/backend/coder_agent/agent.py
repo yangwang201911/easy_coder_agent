@@ -104,6 +104,7 @@ class Agent:
         self.ran_commands = False
         self._fail_streak = 0  # consecutive failing build/run commands
         self._injected: set[str] = set()  # skills already injected during this run
+        self._touched: list[str] = []  # file paths read/written this turn (re-injected after compression)
         self._tools = registry.schemas()
 
     # -------------------------------------------------------------- events
@@ -127,6 +128,17 @@ class Agent:
         # the read cache is now stale: the cached content was summarised away,
         # so a repeat read must return the full content again, not the stub
         self.tool_ctx.turn_cache.clear()
+        # re-inject the working state the summary cannot carry: the todo list
+        # (also shown every step) and the files touched this turn, so the model
+        # knows what to re-read instead of guessing
+        note = ["[Context was compressed. Current state:]"]
+        todo = todo_block(self.tool_ctx.todos)
+        if todo:
+            note.append(todo)
+        if self._touched:
+            recent = list(dict.fromkeys(self._touched))[-10:]
+            note.append("Files read/modified in this session (re-read what you need): " + ", ".join(recent))
+        messages.append({"role": "user", "content": "\n".join(note)})
         if on_compact:
             on_compact(list(new))
         self._emit("context_compressed", before=info.before, after=info.after, algorithm=info.algorithm)
@@ -191,6 +203,8 @@ class Agent:
 
         if tool.kind == "exec":
             self.ran_commands = True
+        if tool.name in ("read_file", "write_file", "apply_patch") and args.get("path"):
+            self._touched.append(str(args["path"]))
         self._emit("status", state="running_tool", detail=tc.name)
         ok, out = self.registry.execute(tc.name, args, self.tool_ctx)
         text = self._after_tool(tool, args, ok, out.text)
@@ -448,7 +462,7 @@ class Agent:
                             {"type": "text", "text": f"[result of {tc.name}: see the attached image]"},
                             *[{"type": "image_url", "image_url": {"url": im["data_url"]}} for im in images],
                         ]})
-                if strikes >= 3:
+                if strikes >= self.cfg.loop_strikes:
                     self._emit("agent_finished", status="loop", steps=step)
                     return AgentResult("loop", final_text, step, "agent kept repeating the same calls")
 

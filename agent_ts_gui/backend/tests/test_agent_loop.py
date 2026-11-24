@@ -1,0 +1,166 @@
+"""Tests for the agent loop: loop detection, compression re-injection, effort handling."""
+
+import json
+import threading
+
+import pytest
+
+from coder_agent.agent import Agent
+from coder_agent.approval import ApprovalPolicy
+from coder_agent.config import AgentConfig, AppConfig, ContextConfig, ThinkingConfig
+from coder_agent.context import ContextManager
+from coder_agent.events import EventBus
+from coder_agent.llm import LLMChunk, LLMProvider, ToolCall, Usage
+from coder_agent.tools.base import Tool, ToolContext
+
+
+class ScriptedProvider(LLMProvider):
+    """Replays a list of replies; records the requests it received."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.requests = []
+
+    def stream_chat(self, messages, tools=None, cancel=None, thinking=None, max_tokens=None, steer=None):
+        self.requests.append({"messages": list(messages), "thinking": thinking})
+        reply = self.replies.pop(0) if self.replies else {"content": "done"}
+        if reply.get("content"):
+            yield LLMChunk("content", reply["content"])
+        calls = [ToolCall(f"c{i}", n, json.dumps(a)) for i, (n, a) in enumerate(reply.get("tool_calls", []))]
+        if calls:
+            yield LLMChunk("tool_calls", tool_calls=calls)
+        yield LLMChunk("usage", usage=Usage(100, 10, 110))
+        yield LLMChunk("done", finish_reason="tool_calls" if calls else "stop")
+
+    def complete(self, messages, cancel=None, thinking=False, max_tokens=None):
+        return "## Goal\ng\n## Status\ndone"
+
+    def list_models(self):
+        return ["fake"]
+
+
+def _make_agent(tmp_path, provider, cfg=None):
+    from coder_agent.tools import default_registry
+    registry = default_registry()
+    policy = ApprovalPolicy.load(tmp_path)
+    tool_ctx = ToolContext(root=tmp_path)
+    agent = Agent("main", provider, registry, tool_ctx, policy, None,
+                  ContextManager(cfg.context if cfg else ContextConfig()), EventBus(),
+                  cfg.agent if cfg else AgentConfig(), ThinkingConfig(), threading.Event())
+    return agent
+
+
+def test_edit_test_loop_not_killed(tmp_path):
+    """Edit -> test -> edit -> test iterations must not trip the loop detector."""
+    n = 6
+    replies = []
+    for i in range(n):
+        replies.append({"tool_calls": [("write_file", {"path": "a.txt", "content": f"v{i}"})]})
+        replies.append({"tool_calls": [("run_command", {"command": "pytest tests/test_a.py -x -q 2>&1 | tail -5 || true"})]})
+    replies.append({"content": "all fixed"})
+    agent = _make_agent(tmp_path, ScriptedProvider(replies))
+    res = agent.run([{"role": "user", "content": "fix the bug"}])
+    assert res.status == "done", res.error
+
+
+def test_identical_repeats_end_with_loop(tmp_path):
+    """The same call repeated with nothing changed must end the run with status=loop."""
+    replies = [{"tool_calls": [("read_file", {"path": "a.txt"})]} for _ in range(8)]
+    agent = _make_agent(tmp_path, ScriptedProvider(replies))
+    res = agent.run([{"role": "user", "content": "read a.txt"}])
+    assert res.status == "loop"
+
+
+def test_loop_strikes_configurable(tmp_path):
+    """loop_strikes=1: a single repeated-call strike ends the run."""
+    replies = [{"tool_calls": [("read_file", {"path": "a.txt"})]} for _ in range(8)]
+    cfg = AppConfig(agent=AgentConfig(loop_strikes=1))
+    agent = _make_agent(tmp_path, ScriptedProvider(replies), cfg)
+    res = agent.run([{"role": "user", "content": "read a.txt"}])
+    assert res.status == "loop"
+
+
+def test_compression_reinjects_todos_and_files(tmp_path):
+    """After compression the agent re-injects todo + touched files, and clears the read cache."""
+    tmp_path.joinpath("a.txt").write_text("x" * 4000, encoding="utf-8")
+    replies = [
+        {"tool_calls": [("update_todo", {"todos": [{"content": "step one", "status": "in_progress"}]}),
+                        ("read_file", {"path": "a.txt"})]},
+        {"content": "done"},
+    ]
+    cfg = AppConfig(context=ContextConfig(max_tokens=100, output_reserve_tokens=0))
+    agent = _make_agent(tmp_path, ScriptedProvider(replies), cfg)
+    res = agent.run([{"role": "user", "content": "work"}])
+    assert res.status == "done"
+    # the second request (after compression) must carry the re-injection note
+    last_msgs = agent.provider.requests[-1]["messages"]
+    note = [m for m in last_msgs if isinstance(m.get("content"), str) and "Context was compressed" in m["content"]]
+    assert note, "no re-injection note after compression"
+    assert "step one" in note[0]["content"]
+    assert "a.txt" in note[0]["content"]
+    # the read cache was cleared: a repeat read after compression returns the content, not the stub
+    out = agent.registry.execute("read_file", {"path": "a.txt"}, agent.tool_ctx)
+    assert "already in your context" not in out[1].text
+
+
+def test_needs_compression_reserves_output(tmp_path):
+    """tokens + output_reserve >= max*threshold triggers compression."""
+    mgr = ContextManager(ContextConfig(max_tokens=1000, compress_threshold=0.80, output_reserve_tokens=0))
+    msgs = [{"role": "user", "content": "a" * 1000}]  # ~250 tokens
+    assert mgr.needs_compression(msgs) is False  # 250 + 0 < 800
+    mgr.cfg = ContextConfig(max_tokens=1000, compress_threshold=0.80, output_reserve_tokens=600)
+    assert mgr.needs_compression(msgs) is True  # 250 + 600 >= 800
+
+
+def test_effort_rejection_drops_field_and_notifies():
+    """A server that rejects reasoning_effort gets one retry without it, plus a status chunk."""
+    import openai
+    from coder_agent.config import SamplingConfig, ServerConfig
+    from coder_agent.llm.openai_compat import OpenAICompatProvider
+
+    class _FakeReq:
+        method = "POST"
+        url = "http://127.0.0.1/v1/chat/completions"
+        headers = {}
+
+    class _FakeResp:
+        status_code = 400
+        request = _FakeReq()
+        headers = {}
+        text = ""
+
+    def _bad_request(message: str) -> openai.BadRequestError:
+        return openai.BadRequestError(message=message, response=_FakeResp(), body=None)
+
+    class _Chunk:
+        usage = None
+        choices = []
+
+    class _Completions:
+        def __init__(self, calls):
+            self._calls = calls
+
+        def create(self, **kw):
+            self._calls.append(kw)
+            if "reasoning_effort" in kw:
+                raise _bad_request(f"invalid value for reasoning_effort: {kw['reasoning_effort']}")
+            return iter([_Chunk()])
+
+    class _Chat:
+        def __init__(self, calls):
+            self.completions = _Completions(calls)
+
+    class _Client:
+        def __init__(self, calls):
+            self.chat = _Chat(calls)
+
+    calls: list[dict] = []
+    provider = OpenAICompatProvider(
+        ServerConfig(model="m"), ThinkingConfig(effort="high"), SamplingConfig())
+    provider.client = _Client(calls)
+    chunks = list(provider.stream_chat([{"role": "user", "content": "hi"}]))
+    assert len(calls) == 2
+    assert "reasoning_effort" in calls[0]
+    assert "reasoning_effort" not in calls[1]
+    statuses = [c.text for c in chunks if c.kind == "status"]
+    assert any("reasoning_effort" in s for s in statuses)

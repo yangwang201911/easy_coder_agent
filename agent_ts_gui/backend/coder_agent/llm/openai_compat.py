@@ -145,9 +145,11 @@ class OpenAICompatProvider(LLMProvider):
                     # the server rejects the effort value (e.g. Ollama without
                     # reasoning support): drop the field and retry once instead
                     # of burning all retries on a deterministic 500
-                    kw.pop("reasoning_effort")
+                    rejected = kw.pop("reasoning_effort")
                     dropped_effort = True
-                    log.warning("server rejected reasoning_effort; retrying without it")
+                    log.warning("server rejected reasoning_effort=%s; retrying without it", rejected)
+                    yield LLMChunk("status", f"the server does not support reasoning_effort='{rejected}'; "
+                                             "continuing without it (change the effort in Settings if needed)")
                     continue
                 if attempt >= _MAX_RETRIES or not _is_retryable(e):
                     raise LLMError(f"{type(e).__name__}: {e}") from e

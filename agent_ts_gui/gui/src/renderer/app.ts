@@ -147,8 +147,8 @@ const S = {
   mode: 0, // 0 = single agent, 1 = plan & subtasks
   busy: false,
   ctxMax: 131072,
-  compressThreshold: 0.95,
-  compressTarget: 0.5,
+  compressThreshold: 0.80,
+  compressTarget: 0.60,
   config: null as Record<string, any> | null,
   state: "idle",
   stateDetail: "",
