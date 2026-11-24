@@ -59,6 +59,8 @@ class Engine:
             self.registry.register(t)
             self.mcp_tool_names.append(t.name)
         self.asker: Optional[Callable[[dict], Optional[dict]]] = None  # set by the server: asks the user a question
+        from .hooks import HookRunner
+        self.hooks = HookRunner(self.root)
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
         from .tools.shell import ShellManager  # persistent shell sessions + background jobs
@@ -164,7 +166,9 @@ class Engine:
                 ask_user=self.asker,
                 todos=list(prev_todos),
                 engine=self,
+                hooks=self.hooks,
             )
+            self.hooks.run("session_start", status="turn_start")
             # plan mode: explore with read-only tools; exit_plan_mode (user approval)
             # swaps in the full registry mid-run
             if plan:
@@ -201,8 +205,10 @@ class Engine:
             result = agent.run(messages, on_append=on_append, on_compact=on_compact)
             turn.ran_commands = agent.ran_commands
             turn.todos = list(tool_ctx.todos)
+            turn.usage = result.usage
             self.session.finish_turn(turn, result.status, result.final_text)
-            self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error)
+            self.hooks.run("turn_end", status=result.status)
+            self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error, usage=result.usage)
             self.bus.emit("status", state="idle", detail="")
             if self.config.agent.memory_extraction and result.status == "done":
                 # background: extraction must not hold the turn lock

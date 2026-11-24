@@ -71,6 +71,7 @@ def _spawn(ctx: ToolContext, args: dict) -> ToolOutput:
         max_output_chars=parent.config.context.tool_output_max_chars,
         extra_roots=parent.policy.extra_roots,
         ask_user=parent.asker,
+        hooks=getattr(parent, "hooks", None),
     )
     provider = parent._provider_override or create_provider(parent.config)
     from ..config import AgentConfig

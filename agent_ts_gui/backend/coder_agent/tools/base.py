@@ -35,6 +35,7 @@ class ToolContext:
     engine: Any = None  # the owning Engine (spawn_agent uses it to build sub-agents)
     agent: Any = None  # the running Agent (exit_plan_mode uses it to swap the tool set)
     todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
+    hooks: Any = None  # HookRunner (.agent/hooks.toml); None when the engine has no hooks
     turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
     read_mtimes: dict = field(default_factory=dict)  # path -> st_mtime_ns of the last read_file (stale-write detection)
 

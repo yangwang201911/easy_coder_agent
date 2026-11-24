@@ -2509,6 +2509,14 @@ function onEvent(ev: AgentEvent) {
       S.stepsBody = null;
     }
     if (d.status !== "ok") chat.line(`\n-- ${d.status} --`, "c-muted");
+    if (d.usage && (d.usage.prompt > 0 || d.usage.completion > 0)) {
+      const u = d.usage;
+      chat.line(
+        `\n[usage] ${u.steps} steps | ${u.prompt} prompt + ${u.completion} completion tok | ` +
+        `ttft avg ${u.ttft_avg_s}s | tools ${u.tool_s}s | wall ${u.wall_s}s`,
+        "c-muted"
+      );
+    }
     if (S.curTurnId && S.curTurnBlocks.length) turnActionBar(S.curTurnId, S.curTurnBlocks);
     S.curTurnId = null;
     S.curTurnBlocks = [];

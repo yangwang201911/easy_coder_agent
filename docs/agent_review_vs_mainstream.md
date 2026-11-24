@@ -62,7 +62,7 @@
 | 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ✅ `/plan` 只读探索 → `exit_plan_mode` 审批（计划→todo）→ 执行（🟡 与盲规划 DAG 并存） |
 | 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 | 🟡 grep 增强 + `code_symbols` 已做；缺 LSP/语义 |
 | 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ❌ 仅 stdio |
-| 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ❌ 无 hooks/用量展示/增量持久化 |
+| 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ✅ hooks（`.agent/hooks.toml`）+ 每 turn 用量统计（GUI 展示） |
 | 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 | 🟡 新后端 98 测试通过；旧 `agent/` 目录仍并存待归档 |
 
 ---
@@ -412,7 +412,10 @@ flowchart LR
 
 ### 5.16 Hooks、检查点、可观测性
 
-**现状**：无 hooks；有基于 `snapshots` 的 rewind（仅覆盖 `write_file/apply_patch`，不覆盖命令副作用，`side_effects_after` 会提示）；有 `prompt_dump` 调试开关与 `context_usage` 事件。
+**现状（已实现）**：
+- **Hooks**：`coder_agent/hooks.py` + `Engine.hooks`，读取 `.agent/hooks.toml`（`[[hooks]] event/tool/command`，占位符 `{event}/{tool}/{path}/{args}/{status}/{output}`）。事件：`pre_tool`（退出码 2 = 拦截，stderr 回给模型）、`post_tool`（stdout 追加到工具结果）、`pre_compact`（退出码 2 = 本步跳过压缩）、`turn_end`、`session_start`（每 turn 开始）。子 Agent（spawn_agent）共享同一 HookRunner。
+- **用量统计**：`Agent.run` 累计 prompt/completion token、平均 TTFT、工具耗时、wall time，经 `AgentResult.usage` 写入 `Turn.usage`（随 session 持久化）并随 `turn_finished` 事件发给 GUI，chat 中每 turn 显示 `[usage] N steps | X prompt + Y completion tok | ttft avg | tools | wall`。
+- 检查点（5.11 已做 move/delete/mkdir 快照覆盖）与崩溃恢复（增量持久化）未做。
 
 **方案**
 1. **Hooks**（P2）：`.agent/hooks.toml`，事件 `pre_tool / post_tool / pre_compact / turn_end / session_start`，匹配器按工具名/参数，动作是执行命令（退出码 2 = 拦截并把 stderr 回给模型）。典型用途：编辑后跑格式化、拦截写入受保护目录。
