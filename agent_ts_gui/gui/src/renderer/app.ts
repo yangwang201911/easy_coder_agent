@@ -394,7 +394,10 @@ async function openProject(root: string, sessionId: string | null = null) {
   setLastProjectName(saved.name);
   // the open project's path lives in the title bar, not on the Project button
   $("titlebar-name").textContent = `Coder Agent: ${r.root}`;
-  ($("rail-project") as HTMLElement).title = `Project: ${saved ? saved.name + " (" + saved.mode + ")\n" : ""}${r.root}\nClick to show the turns of this project`;
+  (document.querySelector<HTMLButtonElement>('#left-rail .tab[data-tab="project"]') as HTMLElement).title =
+    `Project: ${saved ? saved.name + " (" + saved.mode + ")\n" : ""}${r.root}`;
+  // refresh the Projects sub-tab so the "current" marker follows the open root
+  if (typeof renderProjList === "function") void renderProjList();
   document.title = `Coder Agent: ${r.root}`;
   refreshEffortLabel();
   // the last-project record is only meaningful for local paths; in remote mode
@@ -409,7 +412,6 @@ async function openProject(root: string, sessionId: string | null = null) {
   })();
   resetViews();
   await replaySession();
-  await refreshTurnList();
   await refreshSessionList();
   refreshContextEstimate();
   refreshServerInfo();
@@ -621,25 +623,6 @@ async function replaySession() {
   chat.el.scrollTop = chat.el.scrollHeight;
 }
 
-// ------------------------------------------------- left panels (turns / sessions)
-async function refreshTurnList() {
-  const r = await call("session_turns");
-  if (!r || r.__error) return;
-  const ul = $("turn-list");
-  (ul as any).__turns = r.turns;
-  ul.innerHTML = "";
-  for (const t of r.turns) {
-    const li = document.createElement("li");
-    li.dataset.id = t.id;
-    li.title = t.prompt;
-    li.textContent = t.active
-      ? `${t.index}. [${t.status}] ${short(t.prompt, 60)}`
-      : `(branch) [${t.status}] ${short(t.prompt, 54)}`;
-    if (!t.active) li.classList.add("branch");
-    ul.appendChild(li);
-  }
-}
-
 // ------------------------------------------------- session chat view
 // Clicking a session hides the sessions list and shows the chat (output) of
 // that session above the input box; the ← button goes back to the list.
@@ -739,7 +722,6 @@ async function deleteSessions(ids: string[]) {
     S.sessionApprove = false; // new session: "allow all in this session" is reset
     refreshApprovalLabel();
     resetViews();
-    await refreshTurnList();
     await refreshSessionList();
     refreshContextEstimate();
     chat.line("\n[new session started]", "c-muted");
@@ -2231,7 +2213,6 @@ async function rewindTurn(turnId: string, keepBranch: boolean) {
   if (r && r.__error) { chat.line(`\n[error] ${r.__error}`, "c-error"); return; }
   chat.line(`\n[rewound; restored ${(r.restored ?? []).length} file(s)]`, "c-warn");
   await replaySession();
-  await refreshTurnList();
   await refreshSessionList();
   refreshContextEstimate();
 }
@@ -2254,24 +2235,6 @@ async function editTurn(turnId: string) {
   setBusy(true);
   S.thinkChars = 0;
 }
-
-function wireTurnList() {
-  const ul = $("turn-list");
-  ul.addEventListener("contextmenu", (e) => {
-    const li = (e.target as HTMLElement).closest("li");
-    if (!li || S.busy) return;
-    e.preventDefault();
-    const turns = (ul as any).__turns as any[] | undefined;
-    const t = turns?.find((x) => x.id === li.dataset.id);
-    if (!t || !t.active) return;
-    showMenu(e.clientX, e.clientY, [
-      { label: "Edit this prompt and run again...", fn: () => editTurn(t.id) },
-      { label: "Rewind to before this turn (delete it and later turns)", fn: () => rewindTurn(t.id, false) },
-      { label: "Rewind to before this turn (keep later turns as branch)", fn: () => rewindTurn(t.id, true) },
-    ]);
-  });
-}
-wireTurnList();
 
 // ------------------------------------------------------------------ sending
 async function send() {
@@ -2375,7 +2338,6 @@ function onEvent(ev: AgentEvent) {
     S.stepsCount = 0;
     S.turnStart = Date.now();
     log(ev, `task type ${d.task_type}`);
-    refreshTurnList();
     refreshSessionList();
   } else if (k === "thinking_delta") {
     S.thinkChars += (d.text ?? "").length;
@@ -2452,7 +2414,6 @@ function onEvent(ev: AgentEvent) {
     log(ev, d.status);
     setBusy(false);
     setState("idle", "");
-    refreshTurnList();
     refreshSessionList();
     refreshServerInfo();
     void refreshFileTree();
@@ -2475,7 +2436,6 @@ function onEvent(ev: AgentEvent) {
   } else if (k === "session_rewound") {
     void (async () => {
       await replaySession();
-      await refreshTurnList();
       await refreshSessionList();
       refreshContextEstimate();
       await refreshFileTree();
@@ -2669,6 +2629,8 @@ function termPaneEl() { return $("term-pane") as HTMLElement; }
 
 function renderTermList() {
   const ul = termListEl();
+  // hide the list column entirely while no terminal is open
+  ul.parentElement!.classList.toggle("empty", S_TERM.terms.size === 0);
   ul.innerHTML = "";
   for (const [id, t] of S_TERM.terms) {
     const li = document.createElement("li");
@@ -3113,8 +3075,6 @@ $("approval-label").addEventListener("click", () => {
   if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
   void settingsDialog("approval").then((saved) => { if (saved) { refreshApprovalLabel(); chat.line("\n[settings saved]", "c-ok"); } });
 });
-// chat view toolbar: jump to the turns list
-$("chat-turns-btn").addEventListener("click", () => switchLeftTab("turns"));
 $("server-ctx-btn").addEventListener("click", refreshServerInfo);
 // start a fresh session and enter its chat view; false on error (already
 // reported in the chat)
@@ -3125,7 +3085,6 @@ async function startNewSession(): Promise<boolean> {
   S.sessionApprove = false; // a new session: "allow all in this session" is reset
   refreshApprovalLabel();
   resetViews();
-  await refreshTurnList();
   await refreshSessionList();
   refreshContextEstimate();
   clearFileView();
@@ -3134,6 +3093,7 @@ async function startNewSession(): Promise<boolean> {
   return true;
 }
 $("new-session-btn").addEventListener("click", () => void startNewSession());
+$("rail-new-session").addEventListener("click", () => void startNewSession());
 // window controls (frameless window: the page draws its own title bar)
 $("win-min").addEventListener("click", () => void window.api.winMinimize());
 $("win-close").addEventListener("click", () => void window.api.winClose());
@@ -3338,109 +3298,108 @@ function browseRemoteDir(initial: string): Promise<string | null> {
   });
 }
 
-async function projectsDialog(): Promise<void> {
-  // in remote mode the project paths live on the server machine, so a native
-  // folder dialog on this machine would pick paths the server cannot see; the
-  // dialog therefore only shows projects matching the current connection mode
-  const cm = await window.api.getConnMode().catch(() => "local");
-  const remoteMode = cm === "remote" || cm === "ssh";
-  const list = loadProjects().filter((p) => p.mode === (remoteMode ? "remote" : "local"));
-  const last = lastProjectName();
-  const modal = $("modal");
-  modal.className = "modal wide";
-  modal.innerHTML =
-    `<div class="head">Projects</div>` +
-    `<div class="body"><div class="projlist"></div>` +
-    `<div class="msg"></div>` +
-    `<div class="btnrow"><button class="add-project">+ Add project...</button>` +
-    `<button class="rename">Rename</button><button class="del">Delete</button></div>` +
-    `<div class="tip" style="font-size:11px;color:var(--text-soft2)">${remoteMode
-      ? "Projects live on the machine the agent server runs on (type the path, e.g. ~/mygitee/tmp). "
-      : "Projects live on this machine (native folder dialog). "}Projects are remembered by name.</div></div>` +
-    `<div class="foot"><button class="open">Open</button><span class="flex1"></span><button class="primary yes">Close</button></div>`;
-  const listEl = modal.querySelector(".projlist")!;
-  const msg = modal.querySelector(".msg")!;
-  let selected: SavedProject | null = null;
+// ------------------------------------------------- projects panel (left tab)
+// The Projects sub-tab of the combined Project tab lists the saved projects
+// for the current connection mode; clicking a row opens it (like the old
+// projects dialog, now inline next to the left rail).
+let projSelected: SavedProject | null = null;
 
-  function render() {
-    listEl.innerHTML = list.map((p, i) =>
-      `<div class="projrow${p === selected ? " sel" : ""}" data-idx="${i}">` +
-      `<span class="pname">${esc(p.name)}${p.name === last ? "  (last)" : ""}</span>` +
-      `<span class="pmode">${p.mode}</span><span class="ppath">${esc(p.path)}</span></div>`).join("");
-  }
-  render();
-
-  // event delegation: render() rebuilds the rows, so listeners must live on
-  // the container (per-row listeners are lost on re-render and the old
-  // double-click handler never fired after the selection re-render).
-  listEl.addEventListener("click", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLElement>(".projrow");
-    if (!row) return;
-    selected = list[Number(row.dataset.idx)] ?? null;
-    render();
-  });
-  listEl.addEventListener("dblclick", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLElement>(".projrow");
-    if (!row) return;
-    const p = list[Number(row.dataset.idx)];
-    if (!p) return;
-    $("modal-backdrop").classList.remove("show");
-    void openProjectNamed(p.name, p.mode, p.path);
-  });
-  modal.querySelector(".open")!.addEventListener("click", () => {
-    if (!selected) return;
-    $("modal-backdrop").classList.remove("show");
-    void openProjectNamed(selected.name, selected.mode, selected.path);
-  });
-
-  // add a project for the current connection mode: native folder picker in
-  // local mode, path text input (validated via list_dir, with the directory
-  // browser as fallback) in remote mode. The saved project's mode is the
-  // connection mode, so it only shows in the matching dialog.
-  modal.querySelector(".add-project")!.addEventListener("click", async () => {
-    let dir: string | null = null;
-    if (remoteMode) {
-      dir = await addRemoteProject();
-    } else {
-      // __pickDirectory is a CDP-test hook (see window.__onEvent); defaults to
-      // the native picker, which a headless test cannot drive.
-      const pick: () => Promise<string | null> = (window as any).__pickDirectory ?? window.api.pickDirectory;
-      dir = await pick();
-    }
-    if (!dir) return;
-    const name = await promptModal("Project name:", dir.split(/[\\/]/).filter(Boolean).pop() ?? dir);
-    if (!name) return;
-    list.push({ name, mode: remoteMode ? "remote" : "local", path: dir });
-    saveProjects(list);
-    selected = list[list.length - 1];
-    render();
-  });
-  modal.querySelector(".rename")!.addEventListener("click", async () => {
-    if (!selected) return;
-    const name = await promptModal("New name:", selected.name);
-    if (!name) return;
-    selected.name = name;
-    saveProjects(list);
-    render();
-  });
-  modal.querySelector(".del")!.addEventListener("click", () => {
-    if (!selected) return;
-    const i = list.indexOf(selected);
-    if (i >= 0) {
-      list.splice(i, 1);
-      saveProjects(list);
-      if (selected.name === lastProjectName()) setLastProjectName(null);
-      selected = null;
-      render();
-    }
-  });
-  modal.querySelector(".yes")!.addEventListener("click", () => $("modal-backdrop").classList.remove("show"));
-  $("modal-backdrop").classList.add("show");
+function projRemoteMode(): Promise<boolean> {
+  return window.api.getConnMode().catch(() => "local").then((cm) => cm === "remote" || cm === "ssh");
 }
 
-$("rail-project-menu").addEventListener("click", () => {
+async function renderProjList() {
+  const remoteMode = await projRemoteMode();
+  const list = loadProjects().filter((p) => p.mode === (remoteMode ? "remote" : "local"));
+  const last = lastProjectName();
+  // drop the selection if it no longer matches the current mode
+  if (projSelected && !list.includes(projSelected)) projSelected = null;
+  const el = $("proj-list");
+  el.innerHTML = list.length
+    ? list.map((p) => {
+        const sel = p === projSelected ? " sel" : "";
+        const cur = S.root === p.path ? " cur" : "";
+        return `<div class="projrow${sel}${cur}" data-name="${esc(p.name)}">` +
+          `<span class="pname">${esc(p.name)}${p.name === last ? "  (last)" : ""}</span>` +
+          `<span class="pmode">${p.mode}</span><span class="ppath">${esc(p.path)}</span></div>`;
+      }).join("")
+    : '<div class="muted" style="padding:8px">no projects yet - click ＋ to add one</div>';
+  $("proj-tip").textContent = remoteMode
+    ? "Projects live on the machine the agent server runs on (type the path, e.g. ~/mygitee/tmp)."
+    : "Projects live on this machine (native folder dialog).";
+}
+
+function switchProjSub(name: "files" | "projects") {
+  $("project-sub-files").classList.toggle("hidden", name !== "files");
+  $("project-sub-projects").classList.toggle("hidden", name !== "projects");
+  document.querySelectorAll<HTMLButtonElement>("#project-subs .subtab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.sub === name));
+  if (name === "projects") void renderProjList();
+}
+
+document.querySelectorAll<HTMLButtonElement>("#project-subs .subtab").forEach((btn) => {
+  btn.addEventListener("click", () => switchProjSub(btn.dataset.sub! as "files" | "projects"));
+});
+
+// event delegation: renderProjList() rebuilds the rows, so listeners live on
+// the container (per-row listeners are lost on re-render).
+$("proj-list").addEventListener("click", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".projrow");
+  if (!row) return;
+  const list = loadProjects();
+  projSelected = list.find((p) => p.name === row.dataset.name) ?? null;
+  void renderProjList();
+});
+$("proj-list").addEventListener("dblclick", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".projrow");
+  if (!row) return;
+  const p = loadProjects().find((x) => x.name === row.dataset.name);
+  if (p) void openProjectNamed(p.name, p.mode, p.path);
+});
+
+$("proj-add-btn").addEventListener("click", async () => {
   if (S.busy) return;
-  void projectsDialog();
+  const remoteMode = await projRemoteMode();
+  let dir: string | null = null;
+  if (remoteMode) {
+    dir = await addRemoteProject();
+  } else {
+    // __pickDirectory is a CDP-test hook (see window.__onEvent); defaults to
+    // the native picker, which a headless test cannot drive.
+    const pick: () => Promise<string | null> = (window as any).__pickDirectory ?? window.api.pickDirectory;
+    dir = await pick();
+  }
+  if (!dir) return;
+  const name = await promptModal("Project name:", dir.split(/[\\/]/).filter(Boolean).pop() ?? dir);
+  if (!name) return;
+  const list = loadProjects();
+  list.push({ name, mode: remoteMode ? "remote" : "local", path: dir });
+  saveProjects(list);
+  projSelected = list[list.length - 1];
+  void renderProjList();
+});
+$("proj-rename-btn").addEventListener("click", async () => {
+  if (!projSelected) return;
+  const name = await promptModal("New name:", projSelected.name);
+  if (!name) return;
+  const list = loadProjects();
+  const p = list.find((x) => x === projSelected);
+  if (!p) return;
+  p.name = name;
+  saveProjects(list);
+  void renderProjList();
+});
+$("proj-del-btn").addEventListener("click", () => {
+  if (!projSelected) return;
+  const list = loadProjects();
+  const i = list.indexOf(projSelected);
+  if (i >= 0) {
+    list.splice(i, 1);
+    saveProjects(list);
+    if (projSelected.name === lastProjectName()) setLastProjectName(null);
+    projSelected = null;
+    void renderProjList();
+  }
 });
 
 // ------------------------------------------------------- resizable splitters
@@ -3560,8 +3519,8 @@ initBottomSplitter();
 
 // ------------------------------------------------- input box resize handle
 // Drag #input-resize upward to enlarge the chat input box (min 90px, max 60%
-// of the chat view height); double-click resets it to the default 130px.
-const INPUT_DEFAULT = 130;
+// of the chat view height); double-click resets it to the natural height
+// (the zone grows with its content, e.g. the image attach strip).
 const INPUT_MIN = 90;
 const INPUT_MAX = 400;
 
@@ -3574,11 +3533,12 @@ function initInputResize() {
     e.preventDefault();
     handle.classList.add("dragging");
     document.body.classList.add("resizing-h");
-    const grab = e.clientY - handle.getBoundingClientRect().top;
+    const startY = e.clientY;
+    const startH = ($("input-zone") as HTMLElement).getBoundingClientRect().height;
 
     const onMove = (ev: MouseEvent) => {
       const view = $("tab-sessions").getBoundingClientRect();
-      let h = view.bottom - (ev.clientY - grab);
+      let h = startH + (startY - ev.clientY);
       h = Math.min(Math.max(h, INPUT_MIN), Math.max(INPUT_MIN, Math.min(INPUT_MAX, view.height * 0.6)));
       setInputHeight(h);
     };
@@ -3592,7 +3552,8 @@ function initInputResize() {
     window.addEventListener("mouseup", onUp);
   });
   handle.addEventListener("dblclick", () => {
-    ($("input-zone") as HTMLElement).style.height = `${INPUT_DEFAULT}px`;
+    // back to the natural (content-sized) height
+    ($("input-zone") as HTMLElement).style.height = "";
   });
 }
 initInputResize();
