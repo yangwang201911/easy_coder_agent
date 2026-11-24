@@ -233,6 +233,7 @@ class Server:
             "terminal_resize": self.terminal_resize,
             "terminal_close": self.terminal_close,
             "terminal_list": self.terminal_list,
+            "skill_body": self.skill_body,
         }
 
     @property
@@ -368,6 +369,19 @@ class Server:
         images = _validate_images(p.get("images"))
         effort = p.get("effort")
         return self._start_turn(lambda: e.submit(prompt, task_type, images, effort))
+
+    def skill_body(self, p: dict) -> dict:
+        """Full body of a skill by name (for the GUI's ``/skill-name`` slash command)."""
+        e = self._require_engine()
+        from .knowledge import skill_by_name
+
+        name = str(p.get("name", ""))
+        s = skill_by_name(e.root, name)
+        if s is None:
+            from .knowledge import load_skills
+
+            return {"error": f"unknown skill '{name}'", "available": sorted(load_skills(e.root))}
+        return {"name": s.name, "description": s.description, "body": s.body}
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.

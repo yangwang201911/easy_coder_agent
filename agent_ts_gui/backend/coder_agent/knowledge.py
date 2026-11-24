@@ -18,7 +18,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -81,12 +81,19 @@ class Skill:
     body: str
     triggers: Optional[re.Pattern] = None  # when a failing command's output matches, the body is injected
     source: str = "project"  # builtin | user | project
+    tools: Optional[list[str]] = None  # when set, restrict the agent's tool set while this skill is active
+    effort: Optional[str] = None  # suggested thinking effort for work under this skill
+    globs: list[str] = field(default_factory=list)  # file globs the skill is most relevant to
 
     def shown_path(self, root: Path) -> str:
         try:
             return self.path.relative_to(Path(root).resolve()).as_posix()
         except ValueError:
             return str(self.path)  # outside the project: readable through read_file (see agent_read_roots)
+
+
+def _csv(v: str) -> list[str]:
+    return [x.strip() for x in v.split(",") if x.strip()]
 
 
 def load_skills(root: Path) -> dict[str, Skill]:
@@ -107,7 +114,12 @@ def load_skills(root: Path) -> dict[str, Skill]:
                 except re.error:
                     trig = None  # a bad pattern must not break the agent
             name = meta.get("name", f.parent.name)
-            skills[name] = Skill(name, meta.get("description", ""), f.resolve(), body.strip(), trig, source)
+            skills[name] = Skill(
+                name, meta.get("description", ""), f.resolve(), body.strip(), trig, source,
+                tools=_csv(meta["tools"]) if meta.get("tools") else None,
+                effort=meta.get("effort") or None,
+                globs=_csv(meta.get("globs", "")),
+            )
     return skills
 
 
@@ -119,6 +131,58 @@ def matching_skills(root: Path, text: str, exclude: Optional[set[str]] = None) -
     """Skills whose ``triggers`` pattern matches ``text`` (e.g. the output of a failed build)."""
     return [s for s in load_skills(root).values()
             if s.triggers and s.name not in (exclude or set()) and s.triggers.search(text)]
+
+
+def skill_by_name(root: Path, name: str) -> Optional[Skill]:
+    return load_skills(root).get(name)
+
+
+def use_skill_tool() -> Tool:
+    """Model-facing tool: load a skill's full body on demand (progressive disclosure).
+
+    The system prompt only lists name + description; the body is fetched here,
+    deduplicated per run (a second call in the same run returns a stub)."""
+    SKILL_MAX_CHARS = 6000
+
+    def use_skill(ctx: ToolContext, a: dict) -> str:
+        from .util import truncate_middle
+
+        name = a["name"]
+        if not hasattr(ctx, "used_skills"):
+            ctx.used_skills = set()
+        s = skill_by_name(ctx.root, name)
+        if s is None:
+            avail = ", ".join(sorted(load_skills(ctx.root)))
+            return f"No skill named '{name}'. Available skills: {avail}"
+        if name in ctx.used_skills:
+            return f"[skill '{name}' is already loaded in this run - follow it, do not re-load]"
+        ctx.used_skills.add(name)
+        notes = []
+        if s.tools:
+            notes.append(f"this skill suggests using only: {', '.join(s.tools)}")
+        if s.effort:
+            notes.append(f"suggested thinking effort: {s.effort}")
+        header = f"[skill '{name}' - {s.description}]"
+        if notes:
+            header += " (" + "; ".join(notes) + ")"
+        return header + "\n" + truncate_middle(s.body, a.get("max_chars") or SKILL_MAX_CHARS)
+
+    return Tool(
+        "use_skill",
+        "Load a skill's full instructions by name (the system prompt only lists name + description). "
+        "Use it when a listed skill matches the task at hand, BEFORE starting the work. "
+        "The same skill is not re-loaded twice in one run.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "skill name from the skills list"},
+                "max_chars": {"type": "integer", "description": "max body chars to return (default 6000)"},
+            },
+            "required": ["name"],
+        },
+        use_skill,
+        kind="read",
+    )
 
 
 # ---------------------------------------------------------- module docs

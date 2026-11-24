@@ -2292,7 +2292,25 @@ async function send() {
   // starts a fresh session and enters it first. Resolve the attached file
   // BEFORE that (startNewSession clears the file view and would silently
   // drop the attachment).
-  const fullPrompt = await withAttachedFile(prompt);
+  let fullPrompt = await withAttachedFile(prompt);
+  // slash command: "/skill-name <rest>" expands the skill's full body into the
+  // prompt (progressive disclosure, like Claude Code's /skill). The model gets
+  // the instructions inline and follows them for this turn.
+  const slash = prompt.match(/^\/([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/);
+  if (slash) {
+    const sb = await call("skill_body", { name: slash[1] });
+    if (sb && sb.__error) {
+      chat.line(`\n[error] /${slash[1]}: ${sb.__error}`, "c-error");
+      return;
+    }
+    if (sb && sb.error) {
+      chat.line(`\n[error] /${slash[1]}: ${sb.error} (available: ${(sb.available || []).join(", ")})`, "c-error");
+      return;
+    }
+    const rest = (slash[2] || "").trim();
+    fullPrompt = `[skill '${sb.name}' was invoked with /${slash[1]} - follow these instructions for this task]\n${sb.body}\n\n---\nTask: ${rest || "(see the skill instructions)"}`;
+    chat.line(`\n[loaded skill '${sb.name}' via /${slash[1]}]`, "c-soft");
+  }
   // a turn is already running: queue the message as a steer. The agent picks
   // it up at the next safe point (right away if it is between model calls,
   // after the current stream is aborted if it is mid-reply, after the running

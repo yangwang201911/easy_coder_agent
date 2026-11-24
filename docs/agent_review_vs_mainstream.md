@@ -2,7 +2,7 @@
 
 > 范围：`agent_ts_gui/backend/coder_agent`（Python 后端）+ `agent_ts_gui/gui`（Electron GUI）。
 > 对标对象：Claude Code、GitHub Copilot Agent、Cursor/Cline 类主流 Agent。
-> 性质：**评审与方案文档，尚未实施任何改动。**
+> 性质：评审与方案文档。**实施进度见 §1 总表的"状态"列**（✅ 已完成 / 🟡 部分完成 / ❌ 未开始），随实施持续更新。
 
 ## 目录导航
 
@@ -29,7 +29,8 @@
    - 5.16 [Hooks、检查点、可观测性](#516-hooks检查点可观测性)
    - 5.17 [测试与工程质量](#517-测试与工程质量)
 6. [分阶段路线图](#6-分阶段路线图)
-7. [风险与取舍](#7-风险与取舍)
+7. [实施记录（按提交更新）](#7-实施记录按提交更新)
+8. [风险与取舍](#8-风险与取舍)
 
 ---
 
@@ -41,28 +42,28 @@
 - **"能力有但偏弱"**：压缩触发过晚且摘要无结构；memory 无类型与检索；skill 只能被动注入；plan 模式是"盲规划"。
 - **"能力缺失"**：模型可调用的子 Agent、持久 shell/后台任务、git 工具、符号/语义检索、hooks、图片文件读取、编辑后诊断反馈。
 
-| ID | 领域 | 现状评级 | 主要差距 | 优先级 |
-|---|---|---|---|---|
-| B1 | 循环检测 | bug | 编辑-测试循环被误判为重复，3 次 strike 直接终止 | P0 |
-| B2 | 并行工具 | bug | 浏览器 click/type 等标为 `read`，被线程池并行 | P0 |
-| B3 | read 缓存 | bug | 压缩后 stub 声称"已在上下文"，实际已被摘要丢弃 | P0 |
-| B4 | effort | bug | GUI 选择器无效；`high` 非法导致 500 | P0 |
-| 5.2 | 系统提示词 | 弱 | 无新工具指引、无 git/安全/注入/并行规则 | P0 |
-| 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 |
-| 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 |
-| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 |
-| 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 |
-| 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 |
-| 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 |
-| 5.12 | vision | 中 | 无本地图片读取工具；无截图差异；token 估计固定 | P1 |
-| 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 |
-| 5.15 | 安全 | 中 | 无注入防护，无沙箱，权限无模式 | P1 |
-| 5.5 | skills | 中 | 只能失败时被动注入，无 Skill 工具/斜杠调用 | P1 |
-| 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 |
-| 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 |
-| 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 |
-| 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 |
-| 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 |
+| ID | 领域 | 现状评级 | 主要差距 | 优先级 | 状态 |
+|---|---|---|---|---|---|
+| B1 | 循环检测 | bug | 编辑-测试循环被误判为重复，3 次 strike 直接终止 | P0 | ✅ `mutations` 计数 + 可配置 `loop_strikes` |
+| B2 | 并行工具 | bug | 浏览器 click/type 等标为 `read`，被线程池并行 | P0 | ✅ 新增 `kind="action"`，仅 `read` 并行 |
+| B3 | read 缓存 | bug | 压缩后 stub 声称"已在上下文"，实际已被摘要丢弃 | P0 | ✅ 压缩后 `turn_cache.clear()` + 回注 todo/文件 |
+| B4 | effort | bug | GUI 选择器无效；`high` 非法导致 500 | P0 | ✅ GUI→engine→provider 贯通；被拒不重试（🟡 无启动探测，见 5.1） |
+| 5.2 | 系统提示词 | 弱 | 无新工具指引、无 git/安全/注入/并行规则 | P0 | ✅ 分节 base.md + 安全/注入/git 条款（🟡 环境块仍分钟级时间戳） |
+| 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 | ✅ 阈值 0.80+输出预留、结构化摘要、回注（🟡 无 `/compact`、固定单元窗口） |
+| 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 | ✅ `shell_exec/shell_output/shell_kill` + 后台任务 |
+| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件已做；缺 `edit_file`/move/delete/mkdir/诊断 |
+| 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 | ✅ 结构化 typed notes、索引注入、read/write/delete/search、迁移 |
+| 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ❌ 无 `spawn_agent` |
+| 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 | ✅ `git_*` 工具集（含审批与参数检查） |
+| 5.12 | vision | 中 | 无本地图片读取工具；无截图差异；token 估计固定 | P1 | 🟡 `view_image`+截图缩放已做；缺差异/区域/SoM/视觉 token 校准 |
+| 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 | 🟡 `web_fetch(prompt)`+缓存+untrusted 包裹已做；缺 domain 过滤/wait_for 等 |
+| 5.15 | 安全 | 中 | 无注入防护，无沙箱，权限无模式 | P1 | 🟡 注入扫描/SSRF/敏感路径/审计已做；缺权限模式/沙箱 |
+| 5.5 | skills | 中 | 只能失败时被动注入，无 Skill 工具/斜杠调用 | P1 | 🟡 进行中：`use_skill` 工具 + 斜杠调用 |
+| 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ❌ 仍为盲规划 DAG |
+| 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 | 🟡 grep 增强 + `code_symbols` 已做；缺 LSP/语义 |
+| 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ❌ 仅 stdio |
+| 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ❌ 无 hooks/用量展示/增量持久化 |
+| 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 | 🟡 新后端 98 测试通过；旧 `agent/` 目录仍并存待归档 |
 
 ---
 
@@ -475,7 +476,31 @@ gantt
 
 ---
 
-## 7. 风险与取舍
+## 7. 实施记录（按提交更新）
+
+> 分支 `fix/agent-loop-bugs`。每项实施后在此追加一行。
+
+| 日期 | 提交 | 内容 |
+|---|---|---|
+| 2026-11-24 | `d677121` | B1 循环检测：`mutations` 世界状态计数，编辑-测试迭代不再误杀 |
+| 2026-11-24 | `d3cba8d` | B2 并行：新增 `kind="action"`，浏览器/`update_todo`/`ask_user`/`remember` 串行 |
+| 2026-11-24 | `800a0b5` | B3 压缩后 `turn_cache.clear()` |
+| 2026-11-24 | `74d1b1d` | B4/5.1 effort：GUI 选择器贯通到 provider；被拒 effort 不重试并提示 |
+| 2026-11-24 | `7a07b77` | 5.2 系统提示分节重写（工具/git/安全/注入条款）；5.3 阈值 0.80+输出预留+结构化摘要+回注 todo/文件 |
+| 2026-11-24 | `10fcff3` | P0 回归测试（agent loop 回放） |
+| 2026-11-24 | `ec8e7e9` | 5.11 编辑工具：编码探测、大文件流式、patch 相似提示、过期写保护 |
+| 2026-11-24 | `579d44a` | 5.8 持久 shell：`shell_exec/shell_output/shell_kill`、后台任务、日志落盘 |
+| 2026-11-24 | `73285ee` | 5.9 git 工具集（status/diff/log/show/commit/branch/checkout + 审批） |
+| 2026-11-24 | `8ad7f89` | 5.12 `view_image`（Pillow 缩放）；5.13 `web_fetch(prompt)`+缓存+`<untrusted_content>` 包裹 |
+| 2026-11-24 | `2f042c2` | 5.15 安全加固：敏感读审批、`.git` 写拒绝、注入扫描、SSRF 重定向防护、`audit.jsonl` |
+| 2026-11-24 | `a950e4b` | 5.17 测试整理：脚本化 LLM 回放、统一入口、base_url 探测 |
+| 2026-11-24 | `07c79b5` | 5.10 grep 增强（type/glob/offset/head_limit/multiline/context）+ `code_symbols` |
+| 2026-11-24 | `770b17f` | 5.4 memory：结构化 typed notes、索引注入、`memory_write/read/delete/search`、旧格式迁移 |
+| 2026-11-24 | — | 5.5 skills：`use_skill` 工具 + 斜杠 `/skill` 调用 + front-matter `tools/effort`（进行中） |
+
+---
+
+## 8. 风险与取舍
 
 - **本地模型能力**：27B 级模型在长提示、多工具场景下容易出错。工具数量增加会放大 schema 开销与选错概率；建议为每个 `task_type` 保持小工具集，MCP 与低频工具走延迟加载。
 - **并行**：单卡服务并行子 Agent 往往不会更快（排队），默认 `parallelism=1`；仅在服务端确认并发能力后调高。
