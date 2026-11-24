@@ -49,7 +49,7 @@
 | B3 | read 缓存 | bug | 压缩后 stub 声称"已在上下文"，实际已被摘要丢弃 | P0 | ✅ 压缩后 `turn_cache.clear()` + 回注 todo/文件 |
 | B4 | effort | bug | GUI 选择器无效；`high` 非法导致 500 | P0 | ✅ GUI→engine→provider 贯通；被拒不重试；启动 `probe_effort` 探测合法值，GUI 只展示合法值 |
 | 5.2 | 系统提示词 | 弱 | 无新工具指引、无 git/安全/注入/并行规则 | P0 | ✅ 分节 base.md + 安全/注入/git 条款（🟡 环境块仍分钟级时间戳） |
-| 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 | ✅ 阈值 0.80+输出预留、结构化摘要、回注（🟡 无 `/compact`、固定单元窗口） |
+| 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 | ✅ 阈值 0.80+输出预留、结构化摘要、回注、`/compact` 手动压缩（🟡 固定单元窗口） |
 | 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 | ✅ `shell_exec/shell_output/shell_kill` + 后台任务 |
 | 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件+`move_path/delete_path/make_dir`(入快照)已做；缺 `edit_file`/诊断 |
 | 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 | ✅ 结构化 typed notes、索引注入、read/write/delete/search、迁移 |
@@ -499,6 +499,7 @@ gantt
 | 2026-11-24 | `d8182b9` | 5.5 skills：`use_skill` 工具 + 斜杠 `/skill` 调用 + front-matter `tools/effort` + 5 个内置 skill |
 | 2026-11-24 | `0c792ea` | 5.11 `move_path/delete_path/make_dir`（kind=write，进入快照，rewind 可撤销） |
 | 2026-11-24 | — | 5.1 `probe_effort` 启动探测合法 effort 值，`context_info` 返回 `efforts`，GUI 只展示合法值并自动回退非法选择 |
+| 2026-11-24 | `70ea628` | 5.3 `/compact`：`Engine.compact()` 手动压缩 + `compact` RPC + GUI `/compact` 斜杠命令（显示 before→after token） |
 
 ---
 
