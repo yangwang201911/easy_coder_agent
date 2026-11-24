@@ -144,6 +144,7 @@ const S = {
   pendingRoot: null as string | null, // project picked while the backend was not ready
   taskTypes: [] as string[],
   effort: "medium",
+  efforts: [] as string[], // effort values the server accepts (empty = not probed yet)
   mode: 0, // 0 = single agent, 1 = plan & subtasks
   busy: false,
   ctxMax: 131072,
@@ -268,6 +269,14 @@ async function refreshServerInfo() {
   btn.title = "";
   const r = await call("context_info");
   if (r && r.__error) { btn.textContent = "server cache: ?"; return; }
+  if (Array.isArray(r.efforts) && r.efforts.length) {
+    S.efforts = r.efforts;
+    // the current selection may not be supported by this server: fall back to a value that is
+    if (S.effort !== "default" && !S.efforts.includes(S.effort)) {
+      S.effort = S.efforts.includes("medium") ? "medium" : S.efforts[S.efforts.length - 1];
+      refreshEffortLabel();
+    }
+  }
   const info = r.context;
   const mx = r.configured_max;
   if (!info.loaded && !info.model_max) {
@@ -3117,8 +3126,10 @@ $("mode-combo-btn").addEventListener("click", (e) => {
 $("effort-combo").addEventListener("click", (e) => {
   e.stopPropagation();
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  // only offer the values the server accepts (probed at startup); until then, the full set
+  const values = S.efforts.length ? ["default", ...S.efforts] : ["default", "none", "low", "medium", "high"];
   showMenu(rect.left, rect.bottom + 4,
-    ["default", "none", "low", "medium", "high"].map((v) => ({
+    values.map((v) => ({
       label: v + (v === S.effort ? "  ✓" : ""),
       fn: () => { S.effort = v; refreshEffortLabel(); },
     })));

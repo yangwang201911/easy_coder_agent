@@ -37,7 +37,7 @@ from .config import AppConfig, load_config, save_config
 from .context.compression import available_strategies
 from .engine import Engine, _serialised
 from .events import EventBus
-from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
+from .llm import LLMProvider, create_provider, fetch_context_info, probe_effort, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
@@ -510,7 +510,8 @@ class Server:
         e = self._require_engine()
         info = fetch_context_info(e.config.server)
         return {"context": _jsonable(info), "context_text": info.describe(),
-                "configured_max": e.config.context.max_tokens}
+                "configured_max": e.config.context.max_tokens,
+                "efforts": probe_effort(e.config.server)}
 
     def context_estimate(self, p: dict) -> dict:
         e = self._require_engine()

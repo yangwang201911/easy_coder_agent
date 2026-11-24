@@ -474,6 +474,56 @@ def _has_pillow() -> bool:
         return False
 
 
+def test_probe_effort(monkeypatch):
+    from coder_agent.llm import server_info
+
+    class Resp:
+        def __init__(self, code):
+            self.status_code = code
+            self.text = ""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def post(self, url, json=None):
+            # accept none/low/medium, reject high (500) and xhigh (400)
+            return Resp(200 if json.get("reasoning_effort") in ("none", "low", "medium") else 500)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server_info, "DefaultHttpxClient", FakeClient)
+    monkeypatch.setattr(server_info, "_effort_cache", {})
+    got = server_info.probe_effort(ServerConfig(base_url="http://127.0.0.1:1/v1", model="m"))
+    assert got == ["none", "low", "medium"]
+    # cached on the second call
+    monkeypatch.setattr(server_info, "DefaultHttpxClient", _boom)
+    assert server_info.probe_effort(ServerConfig(base_url="http://127.0.0.1:1/v1", model="m")) == ["none", "low", "medium"]
+
+
+def _boom(*a, **k):
+    raise AssertionError("should not be called (cached)")
+
+
+def test_probe_effort_network_error(monkeypatch):
+    from coder_agent.llm import server_info
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def post(self, url, json=None):
+            raise OSError("no route")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(server_info, "DefaultHttpxClient", FakeClient)
+    monkeypatch.setattr(server_info, "_effort_cache", {})
+    assert server_info.probe_effort(ServerConfig(base_url="http://127.0.0.1:1/v1", model="m")) == []
+
+
 def test_vision_fallback_drops_images_for_text_only_model(monkeypatch):
     class Provider:
         server = ServerConfig(base_url="http://127.0.0.1:1/v1", model="m")

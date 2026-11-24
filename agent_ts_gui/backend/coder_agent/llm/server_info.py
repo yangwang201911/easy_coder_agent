@@ -104,6 +104,56 @@ def _probe_vision_uncached(server: ServerConfig, timeout: float) -> Optional[boo
     return None
 
 
+# The effort values a server might accept. Probed at startup; the GUI only offers
+# the ones the server accepts (plus "default" = send nothing).
+_EFFORT_CANDIDATES = ("none", "low", "medium", "high", "xhigh")
+
+_effort_cache: dict[tuple[str, str], tuple[list[str], float]] = {}
+_effort_lock = threading.Lock()
+_EFFORT_TTL = 600.0  # seconds
+
+
+def probe_effort(server: ServerConfig, timeout: float = 20.0) -> list[str]:
+    """Which ``reasoning_effort`` values does this server accept?
+
+    Sends a 1-token non-streaming completion for each candidate and keeps the
+    ones that answer 2xx. Returns an empty list when nothing can be determined
+    (network error) - callers then fall back to the configured default set.
+    Cached per (base_url, model) for a few minutes.
+    """
+    key = (server.base_url, server.model)
+    now = time.monotonic()
+    with _effort_lock:
+        hit = _effort_cache.get(key)
+        if hit and now - hit[1] < _EFFORT_TTL:
+            return hit[0]
+    client = DefaultHttpxClient(timeout=openai.Timeout(timeout), trust_env=not server.bypass_proxy)
+    accepted: list[str] = []
+    try:
+        for effort in _EFFORT_CANDIDATES:
+            try:
+                r = client.post(
+                    server.base_url.rstrip("/") + "/chat/completions",
+                    json={
+                        "model": server.model,
+                        "stream": False,
+                        "max_tokens": 1,
+                        "reasoning_effort": effort,
+                        "messages": [{"role": "user", "content": "ok"}],
+                    },
+                )
+            except Exception:  # noqa: BLE001 - probe, never fatal
+                break
+            if r.status_code == 200:
+                accepted.append(effort)
+    finally:
+        client.close()
+    if accepted:
+        with _effort_lock:
+            _effort_cache[key] = (accepted, now)
+    return accepted
+
+
 def _norm(name: str) -> str:
     name = (name or "").strip()
     return name if ":" in name else name + ":latest"
