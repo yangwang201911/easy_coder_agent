@@ -2302,6 +2302,16 @@ async function send() {
   // BEFORE that (startNewSession clears the file view and would silently
   // drop the attachment).
   let fullPrompt = await withAttachedFile(prompt);
+  // /compact: user-triggered context compaction (summarises the conversation)
+  if (/^\/compact\b/.test(prompt)) {
+    const hint = prompt.replace(/^\/compact\s*/, "").trim();
+    userPromptCard(prompt, `[command]  ${stampOf(Date.now() / 1000)}`);
+    const r = await call("compact", { hint });
+    if (r && r.__error) { chat.line(`\n[error] /compact: ${r.__error}`, "c-error"); return; }
+    if (r && !r.ok) { chat.line(`\n[compact] ${r.reason || "not done"}`, "c-warn"); return; }
+    chat.line(`\n[compact] ${r.before.toLocaleString()} → ${r.after.toLocaleString()} tokens (${r.algorithm})`, "c-ok");
+    return;
+  }
   // slash command: "/skill-name <rest>" expands the skill's full body into the
   // prompt (progressive disclosure, like Claude Code's /skill). The model gets
   // the instructions inline and follows them for this turn.

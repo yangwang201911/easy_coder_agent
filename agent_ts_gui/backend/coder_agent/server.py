@@ -234,6 +234,7 @@ class Server:
             "terminal_close": self.terminal_close,
             "terminal_list": self.terminal_list,
             "skill_body": self.skill_body,
+            "compact": self.compact,
         }
 
     @property
@@ -382,6 +383,13 @@ class Server:
 
             return {"error": f"unknown skill '{name}'", "available": sorted(load_skills(e.root))}
         return {"name": s.name, "description": s.description, "body": s.body}
+
+    def compact(self, p: dict) -> dict:
+        """User-triggered context compaction (the GUI's ``/compact`` command)."""
+        e = self._require_engine()
+        if self._busy:
+            raise RuntimeError("a turn is running - cannot compact now")
+        return e.compact(str(p.get("hint", "")))
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.

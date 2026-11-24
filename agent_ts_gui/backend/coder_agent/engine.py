@@ -195,6 +195,41 @@ class Engine:
         if saved:
             self.bus.emit("memory_saved", notes=saved)
 
+    def compact(self, hint: str = "") -> dict:
+        """User-triggered compaction (the GUI's ``/compact`` command).
+
+        Summarises the whole conversation along the active path into a structured
+        summary and stores it as the new base history. Returns the token counts
+        before/after. Blocked while a turn is running (the lock is held)."""
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("a turn is running - cannot compact now")
+        try:
+            msgs = self.session.build_messages()
+            if len(msgs) < 4:
+                return {"ok": False, "reason": "conversation too short to compact"}
+            provider = self._provider_override or create_provider(self.config)
+
+            def summarize(m: list[dict]) -> str:
+                return provider.complete(m, self.cancel_event, thinking=False, max_tokens=2500)
+
+            before = self.ctx_mgr.tokens(msgs)
+            new, info = self.ctx_mgr.compress(msgs, None, summarize)
+            # store as the base history of a synthetic "compaction" turn so the
+            # next turn starts from the summary; the old messages are archived
+            path = self.session.path()
+            if path:
+                head = path[-1]
+                head.archive.extend(head.messages)
+                head.messages = []
+                head.base_messages = [m for m in new if m.get("role") != "system"]
+            else:
+                self.session.save()
+            self.session.save()
+            self.bus.emit("context_compressed", before=info.before, after=info.after, algorithm=info.algorithm, manual=True)
+            return {"ok": True, "before": before, "after": info.after, "algorithm": info.algorithm}
+        finally:
+            self._lock.release()
+
     # ------------------------------------------------------ plan (subtasks)
     def submit_plan(
         self,
