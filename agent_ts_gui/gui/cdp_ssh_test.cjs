@@ -1,6 +1,8 @@
 // E2E: Settings > Remote server > ssh. An in-process ssh2 server (password "pw") fronts a real
-// coder-agent-server on loopback. Drives the "user@host" window, a cancelled / wrong / right password,
-// and the silent background reconnect (no password window after the tunnel drops).
+// coder-agent-server on loopback. The ssh UI is a named-hosts list in the connection tab
+// (Add host form -> host row -> Apply), followed by the "SSH login" password window.
+// Drives a cancelled / wrong / right password, RPC through the tunnel, and the silent
+// background reconnect (no password window after the tunnel drops).
 // The host key is pre-trusted in known_hosts.json (the native trust dialog cannot be driven over CDP).
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -10,12 +12,21 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const ssh2 = require("ssh2");
-const WebSocket = require("ws");
 const { spawnApp, killApp, getWsUrl, connectCdp, wait, venvPython, killTree } = require("./cdp_test_lib.cjs");
 
 const PASSWORD = "pw";
 const TOKEN = "tok-e2e";
-const SERVER_PORT = 8940 + Math.floor(Math.random() * 40);
+// pick a free port: a random pick can collide with a server left over from a
+// previous crashed run (the test would then connect to the WRONG server)
+const SERVER_PORT = (() => {
+  const { execSync } = require("node:child_process");
+  for (let p = 8940 + Math.floor(Math.random() * 40); p < 8990; p++) {
+    try {
+      if (!execSync(`ss -ltn 2>/dev/null | grep -q :${p}$`, { shell: "/bin/bash", stdio: "ignore" })) return p;
+    } catch { return p; }
+  }
+  return 8990;
+})();
 let failed = false;
 const check = (label, ok) => { console.log(`${ok ? "PASS" : "FAIL"}  ${label}`); if (!ok) failed = true; };
 
@@ -82,35 +93,49 @@ async function noTarget(port, title, ms) {
       await ev("document.getElementById('rail-settings').click()"); await wait(400);
       await ev("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()"); await wait(400);
     };
-    const apply = (mode) => ev(`(() => { const m = document.querySelector('#modal .c-mode'); m.value = '${mode}'; m.dispatchEvent(new Event('change'));
-      document.querySelector('#modal .c-token').value = '${TOKEN}'; document.querySelector('#modal .c-apply').click(); })()`);
     const msg = () => ev("(document.querySelector('#modal .page[data-p=\"connection\"] .msg') || {}).textContent || ''");
-    const fillTarget = async (win) => {
-      await ev("0"); // keep alignment with cdp calls
-      await win.evalJs(`(() => { const i = document.querySelectorAll('input'); i[0].value = 'u@127.0.0.1:${sshPort}'; i[1].value = '${SERVER_PORT}'; document.querySelector('button.ok').click(); })()`);
+    // switch to ssh mode and (re)show the host list
+    const toSsh = () => ev(`(() => { const m = document.querySelector('#modal .c-mode'); m.value = 'ssh'; m.dispatchEvent(new Event('change')); })()`);
+    // add a named host through the form, then select it in the list
+    const addHost = async () => {
+      await ev(`(() => {
+        document.querySelector('#modal .c-host-add').click();
+        const f = (s) => document.querySelector('#modal ' + s);
+        f('.hf-name').value = 'testbox';
+        f('.hf-user').value = 'u';
+        f('.hf-host').value = '127.0.0.1';
+        f('.hf-port').value = '${sshPort}';
+        f('.hf-rport').value = '${SERVER_PORT}';
+        f('.hf-save').click();
+      })()`);
+      await wait(500);
     };
+    const apply = () => ev(`(() => { document.querySelector('#modal .c-token').value = '${TOKEN}'; document.querySelector('#modal .c-apply').click(); })()`);
 
     await openConn();
-    check("ssh group shows the single summary line (no host/user/port fields)",
-      await ev("!document.querySelector('#modal .c-ssh-host') && !!document.querySelector('#modal .c-ssh-summary')"));
+    await toSsh();
+    await wait(300);
+    check("ssh mode shows the host list group (no direct host/port fields)",
+      await ev(`(() => { const g = document.querySelector('#modal .c-sshgrp'); const d = document.querySelector('#modal .c-direct'); return g && g.style.display !== 'none' && d.style.display === 'none'; })()`));
 
-    // A) cancel at the password window
-    await apply("ssh");
-    let w = await waitTarget(app.port, "Connect via SSH");
-    check("Apply opens the user@host window", !!w);
-    check("target window has a single visible target field", (await w.evalJs("document.querySelectorAll('input').length")) === 3 && (await w.evalJs("document.querySelectorAll('details').length")) === 1);
-    await fillTarget(w); w.close();
-    w = await waitTarget(app.port, "SSH login");
-    check("password window follows", !!w && (await w.evalJs("document.querySelector('input').type")) === "password");
+    // A) no host selected: Apply must be rejected with a hint
+    await apply();
+    await wait(500);
+    check("Apply without a host is rejected", /select an ssh host/i.test(await msg()));
+
+    // add the host, then Apply -> password window
+    await addHost();
+    check("host row appears in the list",
+      await ev(`!!document.querySelector('#modal .c-host-row[data-n="testbox"]')`));
+    await apply();
+    let w = await waitTarget(app.port, "SSH login");
+    check("Apply opens the password window", !!w && (await w.evalJs("document.querySelector('input').type")) === "password");
     await w.evalJs("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))"); w.close();
     await wait(1200);
     check("cancel is reported in Settings", /cancelled/i.test(await msg()));
 
     // B) wrong password -> error line -> right password
-    await apply("ssh");
-    w = await waitTarget(app.port, "Connect via SSH");
-    check("target window is prefilled from the saved target", !!w && (await w.evalJs("document.querySelector('input').value")) === `u@127.0.0.1:${sshPort}`);
-    await w.evalJs("document.querySelector('button.ok').click()"); w.close();
+    await apply();
     w = await waitTarget(app.port, "SSH login");
     await w.evalJs(`(() => { document.querySelector('input').value = 'wrong'; document.querySelector('button.ok').click(); })()`); w.close();
     w = await waitTarget(app.port, "SSH login");

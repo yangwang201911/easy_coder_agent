@@ -127,8 +127,12 @@ function check(label, ok) {
       const i = document.querySelector('#modal [data-s="server"][data-k="model"]');
       return i ? { tagName: i.tagName, disabled: i.disabled, value: i.value } : null;
     })()`);
-    check("model field present & editable", !!modelInput && modelInput.tagName === "INPUT" && !modelInput.disabled && modelInput.value.length > 0);
-    await evalJs(`document.querySelector('#modal [data-s="server"][data-k="model"]').value = "test-model-xyz"`);
+    // the model field is a <select> (options load from the server on focus);
+    // the saved value must be present as an option and selectable
+    check("model field present & editable", !!modelInput && modelInput.tagName === "SELECT" && !modelInput.disabled && modelInput.value.length > 0);
+    // add the test value as an option, then select it (a plain .value= on a
+    // select without the option would silently stay "")
+    await evalJs(`(() => { const s = document.querySelector('#modal [data-s="server"][data-k="model"]'); s.add(new Option("test-model-xyz", "test-model-xyz")); s.value = "test-model-xyz"; })()`);
     await evalJs("document.querySelector('#modal .yes').click()");
     await wait(800);
     const savedMsg = String(await evalJs("document.getElementById('chat').textContent"));

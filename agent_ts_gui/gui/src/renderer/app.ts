@@ -1988,7 +1988,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       const mode = (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote" | "ssh";
       if (mode === "ssh") {
         const sel = sshHosts.find((x) => x.name === selHost);
-        if (!sel) { showMsg(cPage, false, "Select an SSH host first (Add host, then click it in the list)."); return; }
+        if (!sel) { showMsg(cPage, false, "Select an SSH host first (Add host, then click it in the list)."); btn.disabled = false; return; }
         m.textContent = "Connecting (a password window follows if the server asks)...";
         const sr = await window.api.sshConnect({
           host: sel,
@@ -2002,7 +2002,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
           return;
         }
         showMsg(cPage, true, `Connected to ${sr.url}. The current project will be reopened.`);
-        void refreshRemoteLabel();
+        void refreshConnLabel();
         setTimeout(() => done(false), 400);
         return;
       }
@@ -2022,7 +2022,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
         showMsg(cPage, true, "No change.");
       }
       // close the dialog: the connection is applied and saved (or unchanged)
-      void refreshRemoteLabel();
+      void refreshConnLabel();
       setTimeout(() => done(false), r.reconnected ? 400 : 1200);
     });
 
@@ -3723,7 +3723,7 @@ async function resolveProjectRoot(): Promise<string | null> {
 // banner is up (or the connection URL changed) re-open the project on the new
 // backend so a local<->remote switch restores the working session.
 window.api.onBackendUrl(async (url: string) => {
-  void refreshRemoteLabel();
+  void refreshConnLabel();
   if (!bootDone || !bootProjectDone) return; // boot() opens the first project itself
   const urlChanged = url !== lastBackendUrl;
   lastBackendUrl = url;
