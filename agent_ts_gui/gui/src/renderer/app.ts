@@ -2309,7 +2309,8 @@ async function send() {
     if (images.length) chat.line("\n[plan mode: images are not sent to the planner]", "c-warn");
     call("submit_plan", { goal: fullPrompt }).then((r) => afterSubmit(r));
   } else {
-    call("submit", { prompt: fullPrompt, task_type: taskType, images }).then((r) => afterSubmit(r));
+    // effort: the GUI selector ("default" = use the saved setting)
+    call("submit", { prompt: fullPrompt, task_type: taskType, images, effort: S.effort === "default" ? null : S.effort }).then((r) => afterSubmit(r));
   }
 }
 

@@ -70,6 +70,13 @@ class Engine:
     def close(self) -> None:
         self.mcp.close()
 
+    def _config_for(self, effort: Optional[str]) -> AppConfig:
+        """The config for one turn: an explicit ``effort`` (GUI selector) overrides the saved setting."""
+        if not effort:
+            return self.config
+        thinking = self.config.thinking.model_copy(update={"effort": effort})
+        return self.config.model_copy(update={"thinking": thinking})
+
     def apply_config(self, config: AppConfig) -> None:
         """Call between runs after the user edited settings."""
         self.config = config
@@ -101,11 +108,14 @@ class Engine:
         prompt: str,
         task_type: Optional[str] = None,
         images: Optional[list[dict]] = None,
+        effort: Optional[str] = None,
     ) -> AgentResult:
         """Run one user turn to completion (blocking - call from a worker thread).
 
         ``images``: [{"name": str, "data_url": "data:image/..."}] sent to the model
-        as image_url parts of the user message (needs a vision-capable model)."""
+        as image_url parts of the user message (needs a vision-capable model).
+        ``effort``: thinking effort for this turn (GUI selector); overrides the
+        saved setting when given."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
         turn: Optional[Turn] = None
@@ -118,7 +128,10 @@ class Engine:
             self.session.save()
             self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt, images=turn.images)
 
-            provider = self._provider_override or create_provider(self.config)
+            # effort for this turn: GUI selector > task type suggestion > saved setting
+            turn_effort = effort or tt.effort
+            cfg = self._config_for(turn_effort)
+            provider = self._provider_override or create_provider(cfg)
             registry = self.registry.subset([*tt.tools, *self.mcp_tool_names]) if tt.tools else self.registry
             # carry the checklist over from the previous turn so it survives across turns
             prev = self.session.path()

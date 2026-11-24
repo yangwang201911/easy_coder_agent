@@ -362,7 +362,8 @@ class Server:
         e = self._require_engine()
         prompt, task_type = p.get("prompt", ""), p.get("task_type")
         images = _validate_images(p.get("images"))
-        return self._start_turn(lambda: e.submit(prompt, task_type, images))
+        effort = p.get("effort")
+        return self._start_turn(lambda: e.submit(prompt, task_type, images, effort))
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.
