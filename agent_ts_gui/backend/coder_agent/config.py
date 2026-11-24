@@ -45,7 +45,7 @@ class SamplingConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     max_tokens: int = 131072  # server-side cache / context length (128k)
-    compress_threshold: float = 0.95  # compress when usage >= this ratio
+    compress_threshold: float = 0.80  # compress when usage >= this ratio (0.95 left little headroom)
     compress_target: float = 0.60  # ... down to this ratio
     algorithm: str = "summarize"
     keep_recent_units: int = 10  # newest message units never summarised

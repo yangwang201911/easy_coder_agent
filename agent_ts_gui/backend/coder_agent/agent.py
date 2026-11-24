@@ -310,7 +310,6 @@ class Agent:
 
         seen: dict[str, int] = {}
         seen_at: dict[str, int] = {}  # mutation count when the call was last seen
-        last_result: dict[str, str] = {}  # last result text per call key
         strikes = 0
         mutations = 0  # writes/execs since the turn started
         cutoffs = 0
@@ -415,17 +414,15 @@ class Agent:
                     # A write/exec since the previous identical call means the agent changed
                     # something (e.g. re-running the same test after an edit): that is a
                     # debug iteration, not a loop - reset the counter for this call.
+                    prev_mut = seen_at.get(key, mutations)
                     if key in seen_at and seen_at[key] != mutations:
                         seen[key] = 0
                     seen[key] = seen.get(key, 0) + 1
                     seen_at[key] = mutations
-                    near = [k for k in last_result if k != key and k.startswith(tc.name + "|")
-                            and difflib.SequenceMatcher(None, k, key).ratio() > 0.85]
-                    dup = seen[key] > self.cfg.loop_limit
-                    if not dup and seen[key] > 1:
-                        # a nearly identical call that returned the SAME result as this
-                        # one's previous run: the agent is flailing, not iterating
-                        dup = any(last_result.get(k) and last_result.get(k) == last_result.get(key) for k in near)
+                    # A loop is the same exact call repeated beyond the limit with
+                    # NOTHING changed in between. Re-running a command after an edit
+                    # (or with slightly different args) is iteration, not a loop.
+                    dup = seen[key] > self.cfg.loop_limit and prev_mut == mutations
                     if dup:
                         strikes += 1
                         result = (
@@ -436,7 +433,6 @@ class Agent:
                         images = []
                     else:
                         result, images = results[tc.id]
-                        last_result[key] = result
                         t = self.registry.get(tc.name)
                         if t is not None and t.kind in ("write", "exec"):
                             mutations += 1

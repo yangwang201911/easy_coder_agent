@@ -129,10 +129,14 @@ def render_transcript(messages: list[dict], per_message_chars: int = 1500) -> st
 
 SUMMARY_PROMPT = (
     "You are compacting the history of a coding-agent session so work can continue with a smaller "
-    "context. Write a dense summary (max ~600 words) in the same language the user used. Keep: "
-    "1) the user's goal and constraints; 2) files created/modified and why; 3) important facts "
-    "learned (build commands, errors, APIs, paths); 4) decisions made; 5) what is done and what "
-    "remains. Do not invent anything. No preamble."
+    "context. Write a dense summary (max ~600 words) in the same language the user used, using "
+    "EXACTLY this structure (drop a section only if it is empty):\n"
+    "## Goal\nThe user's goal and constraints, in 1-3 sentences.\n"
+    "## Files\nFiles created/modified and why (path: one-line reason).\n"
+    "## Facts\nImportant facts learned: build/test commands, errors and their fixes, APIs, paths.\n"
+    "## Decisions\nDecisions made and why.\n"
+    "## Status\nWhat is done, what remains (next concrete step).\n"
+    "Do not invent anything. No preamble, no other headings."
 )
 SUMMARY_HEADER = "[Summary of earlier conversation - older messages were compacted]\n"
 
