@@ -126,7 +126,8 @@ class McpHub:
         ]
         if getattr(result, "is_error", None) or getattr(result, "isError", False):
             raise ToolError(text or f"MCP tool {tool} failed")
-        return ToolOutput(text=text or "(no text output)", images=images)
+        from .web import _untrusted
+        return ToolOutput(text=_untrusted(f"mcp:{server}:{tool}", text or "(no text output)"), images=images)
 
     def _tool(self, server: str, spec: Any) -> Tool:
         name = f"mcp__{server}__{spec.name}"

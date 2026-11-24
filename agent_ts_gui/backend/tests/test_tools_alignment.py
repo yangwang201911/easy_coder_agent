@@ -134,8 +134,13 @@ def test_web_search_and_fetch(site, ctx, monkeypatch):
     monkeypatch.setenv("SEARXNG_URL", site)
     out = web.web_search(ctx, {"query": "python", "max_results": 2})
     assert "1. Python docs" in out and "Official & docs" in out and "https://b.example" in out
+    assert out.startswith("<untrusted_content") and out.endswith("</untrusted_content>")
     text = web.web_fetch(ctx, {"url": site + "/page"})
-    assert text.startswith("My Page") and "World & more" in text and "evil" not in text
+    assert "My Page" in text and "World & more" in text and "evil" not in text
+    assert text.startswith("<untrusted_content") and "[cached]" not in text
+    # second fetch within the 15-minute cache window is served from cache
+    text2 = web.web_fetch(ctx, {"url": site + "/page"})
+    assert "[cached]" in text2
     with pytest.raises(ToolError):
         web.web_fetch(ctx, {"url": "file:///etc/passwd"})
 
@@ -363,6 +368,47 @@ def test_waves_parallel_safe():
     assert [len(x) for x in w] == [1, 1]
     # default is parallel-safe
     assert SubTask("a", "a", "ga").parallel_safe is True
+
+
+def test_web_fetch_prompt_extraction(site, ctx):
+    web._fetch_cache.clear()
+    out = web.web_fetch(ctx, {"url": site + "/page", "prompt": "World more"})
+    assert "World & more" in out and "<untrusted_content" in out
+    # terms not on the page -> friendly empty result
+    out2 = web.web_fetch(ctx, {"url": site + "/page", "prompt": "zebra quantum"})
+    assert "no part of the page" in out2
+    # _extract_relevant keeps the matched paragraph plus its predecessor
+    text = "intro para\n\nalpha beta gamma\n\nunrelated para one\n\ndelta gamma again\n\nunrelated para two"
+    picked = web._extract_relevant(text, "gamma", 6000)
+    assert "alpha beta gamma" in picked and "delta gamma again" in picked and "intro para" in picked
+    assert "unrelated para one" in picked  # predecessor of a match is kept
+    assert "unrelated para two" not in picked
+
+
+def test_view_image(ctx, tmp_path):
+    from coder_agent.tools import vision
+
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    out = vision.view_image(ctx, {"path": "pic.png"})
+    assert out.images and out.images[0]["data_url"].startswith("data:image/")
+    (tmp_path / "README.md").write_text("x", encoding="utf-8")
+    with pytest.raises(ToolError, match="not an image"):
+        vision.view_image(ctx, {"path": "README.md"})
+    with pytest.raises(ToolError, match="not found"):
+        vision.view_image(ctx, {"path": "nope.png"})
+    # without Pillow, large files are rejected with a hint
+    (tmp_path / "big.png").write_bytes(b"\x89PNG" + b"0" * (600 * 1024))
+    if not _has_pillow():
+        with pytest.raises(ToolError, match="Pillow"):
+            vision.view_image(ctx, {"path": "big.png"})
+
+
+def _has_pillow() -> bool:
+    try:
+        import PIL  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def test_vision_fallback_drops_images_for_text_only_model(monkeypatch):

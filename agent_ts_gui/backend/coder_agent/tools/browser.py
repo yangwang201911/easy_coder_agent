@@ -225,7 +225,8 @@ def _snapshot_text(page) -> str:
     refs = page.evaluate(_SNAPSHOT_JS, MAX_ELEMENTS)
     text = page.evaluate("() => document.body ? document.body.innerText : ''")
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()[:MAX_TEXT_CHARS]
-    return f"Page: {title}\nURL: {page.url}\n\n## Interactive elements\n{refs or '(none)'}\n\n## Text\n{text}"
+    from .web import _untrusted
+    return _untrusted(page.url, f"Page: {title}\nURL: {page.url}\n\n## Interactive elements\n{refs or '(none)'}\n\n## Text\n{text}")
 
 
 def browser_navigate(ctx: ToolContext, a: dict) -> str:
@@ -307,6 +308,14 @@ def browser_take_screenshot(ctx: ToolContext, a: dict) -> ToolOutput:
     data, url = _BROWSER.call(run)
     if len(data) > MAX_SCREENSHOT_BYTES:
         raise ToolError("screenshot too large; retry with full_page=false")
+    # full-page shots can be very tall: downscale the long side to keep the
+    # visual token cost bounded (no-op for viewport shots, already <=1280 wide)
+    if full_page:
+        try:
+            from .vision import resize_jpeg
+            data = resize_jpeg(data)
+        except ImportError:
+            pass  # no Pillow: pass through, the size guard above still applies
     return ToolOutput(
         text=f"screenshot of {url} attached below ({len(data) // 1024} KB). Inspect the rendered page.",
         images=[{"name": "screenshot", "data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode()}],
