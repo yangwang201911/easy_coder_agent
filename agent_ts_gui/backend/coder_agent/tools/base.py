@@ -31,6 +31,7 @@ class ToolContext:
     read_roots: list[Path] = field(default_factory=agent_read_roots)  # extra READ-only locations
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
     ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
+    shell: Any = None  # ShellManager for the persistent shell tools (lazy)
     todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
     turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
     read_mtimes: dict = field(default_factory=dict)  # path -> st_mtime_ns of the last read_file (stale-write detection)

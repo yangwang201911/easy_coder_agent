@@ -61,6 +61,8 @@ class Engine:
         self.asker: Optional[Callable[[dict], Optional[dict]]] = None  # set by the server: asks the user a question
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
+        from .tools.shell import ShellManager  # persistent shell sessions + background jobs
+        self._shell_manager = ShellManager(self.root)
         # Steer: the user sends a new message while a turn is running. The agent
         # loop picks it up at the next safe point (top of step) and continues.
         self._steer_event = threading.Event()
@@ -69,6 +71,12 @@ class Engine:
     # ------------------------------------------------------------- settings
     def close(self) -> None:
         self.mcp.close()
+        # persistent shell sessions and their background jobs die with the engine
+        try:
+            if self._shell_manager is not None:
+                self._shell_manager.close()
+        except Exception:  # noqa: BLE001 - best effort during shutdown
+            pass
 
     def _config_for(self, effort: Optional[str]) -> AppConfig:
         """The config for one turn: an explicit ``effort`` (GUI selector) overrides the saved setting."""
@@ -141,6 +149,7 @@ class Engine:
                 cancel=self.cancel_event,
                 emit=lambda kind, data: self.bus.emit(kind, "main", **data),
                 snapshots=self.session.snapshots,
+                shell=self._shell_manager,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
                 ask_user=self.asker,

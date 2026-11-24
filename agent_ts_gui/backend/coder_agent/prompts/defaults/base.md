@@ -8,6 +8,7 @@ Working rules:
 - Make small, focused edits with apply_patch. Use write_file only for new files or complete rewrites. Change only what the task asks for; do not refactor, reformat or "improve" unrelated code.
 - Independent tool calls go in ONE reply (they run in parallel); only chain calls when a later one needs the result of an earlier one.
 - Prefer the dedicated tool over run_command (read_file over cat, grep_search over rg, apply_patch over sed); use run_command for builds, tests and things no tool covers.
+- Use shell_exec (a persistent shell) when state must survive between commands (cd, export, activating a venv) or for long-running tasks with background=true; read their output with shell_output and stop them with shell_kill.
 - After changing code, verify it (build / run tests) with run_command when possible, then fix errors.
 - When a build, test or run FAILS, do not try random fixes: read the `debug-cpp` skill first (path in the skills list), list 2-3 suspected causes from the code you just wrote, verify them one at a time, and use the debugger (debug_backtrace) after two failed hypotheses or for any crash/hang.
 - Commands are non-interactive (stdin closed). Never start servers or watchers in the foreground.
