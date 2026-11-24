@@ -53,7 +53,7 @@
 | 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 | ✅ `shell_exec/shell_output/shell_kill` + 后台任务 |
 | 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件+`move_path/delete_path/make_dir`(入快照)已做；缺 `edit_file`/诊断 |
 | 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 | ✅ 结构化 typed notes、索引注入、read/write/delete/search、迁移 |
-| 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ❌ 无 `spawn_agent` |
+| 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ✅ `spawn_agent`（explore 只读 / general 受限步数，防递归，取消传播）（🟡 无 worktree 隔离） |
 | 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 | ✅ `git_*` 工具集（含审批与参数检查） |
 | 5.12 | vision | 中 | 无本地图片读取工具；无截图差异；token 估计固定 | P1 | 🟡 `view_image`+截图缩放已做；缺差异/区域/SoM/视觉 token 校准 |
 | 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 | 🟡 `web_fetch(prompt)`+缓存+untrusted 包裹已做；缺 domain 过滤/wait_for 等 |
@@ -501,6 +501,7 @@ gantt
 | 2026-11-24 | — | 5.1 `probe_effort` 启动探测合法 effort 值，`context_info` 返回 `efforts`，GUI 只展示合法值并自动回退非法选择 |
 | 2026-11-24 | `70ea628` | 5.3 `/compact`：`Engine.compact()` 手动压缩 + `compact` RPC + GUI `/compact` 斜杠命令（显示 before→after token） |
 | 2026-11-24 | `ff2d10c` | 5.15 权限模式：`ApprovalPolicy.mode`（default/accept_edits/plan/bypass）+ `set_mode`/`get_mode` RPC + GUI 模式菜单 |
+| 2026-11-24 | `ade1502` | 5.7 `spawn_agent`：explore（只读工具）/ general（全工具+步数上限）子 Agent，独立上下文，防递归，4 个回归测试 |
 
 ---
 
