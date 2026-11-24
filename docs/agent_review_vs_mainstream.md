@@ -56,7 +56,7 @@
 | 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ✅ `spawn_agent`（explore 只读 / general 受限步数，防递归，取消传播）（🟡 无 worktree 隔离） |
 | 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 | ✅ `git_*` 工具集（含审批与参数检查） |
 | 5.12 | vision | 中 | 无本地图片读取工具；无截图差异；token 估计固定 | P1 | 🟡 `view_image`+截图缩放已做；缺差异/区域/SoM/视觉 token 校准 |
-| 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 | 🟡 `web_fetch(prompt)`+缓存+untrusted 包裹已做；缺 domain 过滤/wait_for 等 |
+| 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 | ✅ `web_fetch(prompt)`+缓存+untrusted 包裹 + `web_search` domain 过滤 + `browser_wait_for`（🟡 缺 handle_dialog 等） |
 | 5.15 | 安全 | 中 | 无注入防护，无沙箱，权限无模式 | P1 | ✅ 注入扫描/SSRF/敏感路径/审计 + 权限模式（default/accept_edits/plan/bypass）（🟡 缺沙箱） |
 | 5.5 | skills | 中 | 只能失败时被动注入，无 Skill 工具/斜杠调用 | P1 | 🟡 进行中：`use_skill` 工具 + 斜杠调用 |
 | 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ✅ `/plan` 只读探索 → `exit_plan_mode` 审批（计划→todo）→ 执行（🟡 与盲规划 DAG 并存） |
@@ -504,6 +504,7 @@ gantt
 | 2026-11-24 | `ade1502` | 5.7 `spawn_agent`：explore（只读工具）/ general（全工具+步数上限）子 Agent，独立上下文，防递归，4 个回归测试 |
 | 2026-11-24 | `aa20510` | 5.6 计划模式：`/plan` 只读探索 → `exit_plan_mode` 用户审批（计划→todo）→ 中途切换全工具集，2 个回归测试 |
 | 2026-11-24 | `4d48fd6` | 5.11 `edit_file` 原子多处编辑：全部匹配才写盘，任一失败零改动，6 个回归测试 |
+| 2026-11-24 | `8241f44` | 5.13 `web_search` allowed/blocked_domains（后缀匹配）+ `browser_wait_for(text|ref|state)`，7 个回归测试 |
 
 ---
 
