@@ -15,30 +15,16 @@ const REMOTE_PORT = 8931;
 const IS_WIN = process.platform === "win32";
 const VENV_PY = path.join(BACKEND, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
 
-// name -> script. Order matters only for readability.
-const SUITES = {
-  connection_regression: "connection_regression_test.cjs",
-  ssh_tunnel: "ssh_tunnel_test.cjs",
-  ssh: "cdp_ssh_test.cjs",
-  settings_boot: "cdp_settings_boot_test.cjs",
-  boot: "cdp_boot_test.cjs",
-  proj: "cdp_proj_test.cjs",
-  proj_switch: "cdp_proj_switch_test.cjs",
-  localpick: "cdp_localpick_test.cjs",
-  local_add: "cdp_local_add_test.cjs",
-  ctxmenu: "cdp_ctxmenu_test.cjs",
-  split: "cdp_split_test.cjs",
-  files: "cdp_files_test.cjs",
-  fileattach: "cdp_fileattach_test.cjs",
-  theme: "cdp_theme_test.cjs",
-  debug: "cdp_debug_test.cjs",
-  restart_close: "cdp_restart_close_test.cjs",
-  remote: "cdp_remote_test.cjs",
-  conn_switch: "cdp_conn_switch_test.cjs",
-  terminal: "cdp_terminal_test.cjs",
-  termcmd: "cdp_termcmd_test.cjs",
-  collapsible: "cdp_collapsible_test.cjs",
-};
+// name -> script. Auto-discovered: every cdp_*_test.cjs in this directory is a
+// suite (add a file, it is picked up - no list to maintain). cdp_*_test2.cjs
+// duplicates and cdp_test_lib.cjs are excluded by the pattern.
+const SUITES = {};
+for (const f of fs.readdirSync(GUI).filter(f => /^cdp_.*_test\.cjs$/.test(f)).sort()) {
+  SUITES[f.replace(/^cdp_/, "").replace(/_test\.cjs$/, "")] = f;
+}
+// suites without the cdp_ prefix
+SUITES.connection_regression = "connection_regression_test.cjs";
+SUITES.ssh_tunnel = "ssh_tunnel_test.cjs";
 
 function pick() {
   const args = process.argv.slice(2);

@@ -25,32 +25,21 @@ run_backend() {
   fi
 }
 
-run_gui() { # $1 = cdp test file name (without .cjs)
-  local name="$1"
-  echo "=== gui: ${name} ==="
-  if ! (cd gui && node "cdp_${name}_test.cjs"); then
-    failed+=("${name}")
+run_gui() { # $1... = suite names (see gui/run_all_tests.cjs for the list)
+  if ! (cd gui && node run_all_tests.cjs "$@"); then
+    failed+=("gui:$*")
   fi
 }
 
 case "$target" in
   backend) run_backend ;;
-  gui)
-    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal copy collapsible; do
-      run_gui "$t"
-    done
-    ;;
-  remote)
-    echo "(remote test needs a standalone server on 127.0.0.1:8931 - start it first)"
-    run_gui remote
-    ;;
+  gui) run_gui ;;
+  remote) run_gui remote ;;
   all)
     run_backend
-    for t in boot theme split proj proj_switch ctxmenu files fileattach local_add localpick restart_close debug image terminal copy collapsible; do
-      run_gui "$t"
-    done
+    run_gui
     ;;
-  cdp_*_test.cjs|*.cjs) run_gui "$(basename "$target" .cjs | sed 's/^cdp_//')" ;;
+  cdp_*_test.cjs|*.cjs) run_gui "$(basename "$target" .cjs | sed 's/^cdp_//;s/_test$//')" ;;
   *)
     run_gui "$target"
     ;;

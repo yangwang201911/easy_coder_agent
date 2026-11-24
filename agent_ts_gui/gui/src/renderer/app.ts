@@ -397,6 +397,11 @@ async function openProject(root: string, sessionId: string | null = null) {
   ($("rail-project") as HTMLElement).title = `Project: ${saved ? saved.name + " (" + saved.mode + ")\n" : ""}${r.root}\nClick to show the turns of this project`;
   document.title = `Coder Agent: ${r.root}`;
   refreshEffortLabel();
+  // connection probe: surface a clear hint when the configured base_url does
+  // not answer (e.g. 127.0.0.1:11434 while the service runs elsewhere)
+  if (r.model_probe && /unavailable/.test(String(r.model_probe))) {
+    chat.line(`\n[model server unreachable] ${r.config?.server?.base_url ?? "?"}: ${r.model_probe}\nCheck Settings > Model (base_url / api_key).`, "c-error");
+  }
   // the last-project record is only meaningful for local paths; in remote mode
   // the project lives on the server machine (remembered by name in localStorage)
   window.api.getConnMode().then((m) => { if (m === "local") window.api.setLastProject(r.root); }).catch(() => {});

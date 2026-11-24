@@ -349,6 +349,9 @@ class Server:
         self._unsubscribe = self.bus.subscribe(self._on_bus_event)
         self.root = root
         self._last_root = root
+        # connection probe: a cheap HTTP GET (no model call) tells the GUI right
+        # away when the configured base_url does not match the running service
+        probe = fetch_context_info(cfg.server)
         return {
             "root": str(root),
             "session_id": self.engine.session.id,
@@ -356,6 +359,7 @@ class Server:
             "effort": cfg.thinking.effort,
             "config": _jsonable(cfg),
             "session_approve": False,  # a new engine: the session-wide auto-approve is reset
+            "model_probe": probe.describe(),
         }
 
     def submit(self, p: dict) -> dict:

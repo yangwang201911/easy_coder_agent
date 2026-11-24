@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from coder_agent.agent import Agent
-from coder_agent.approval import ApprovalPolicy
+from coder_agent.approval import ApprovalPolicy, ApprovalResponse
 from coder_agent.config import AgentConfig, AppConfig, ContextConfig, ThinkingConfig
 from coder_agent.context import ContextManager
 from coder_agent.events import EventBus
@@ -110,6 +110,97 @@ def test_needs_compression_reserves_output(tmp_path):
     assert mgr.needs_compression(msgs) is False  # 250 + 0 < 800
     mgr.cfg = ContextConfig(max_tokens=1000, compress_threshold=0.80, output_reserve_tokens=600)
     assert mgr.needs_compression(msgs) is True  # 250 + 600 >= 800
+
+
+def test_parallel_batch_order_and_serial_actions(tmp_path):
+    """read tools run concurrently, action tools run serially after the batch;
+    results are appended in the original call order."""
+    import time as _time
+
+    from coder_agent.tools.base import Tool, ToolRegistry
+
+    order: list[tuple[str, float]] = []
+    done: dict[str, float] = {}
+    start: dict[str, float] = {}
+
+    def make(name: str, kind: str) -> Tool:
+        def f(ctx, a):
+            order.append((name, _time.monotonic()))
+            start[name] = _time.monotonic()
+            _time.sleep(0.15)
+            done[name] = _time.monotonic()
+            return f"ok:{name}"
+        return Tool(name=name, description=name, parameters={"type": "object", "properties": {}},
+                    func=f, kind=kind)
+
+    registry = ToolRegistry()
+    for t in (make("ra", "read"), make("act", "action"), make("rb", "read")):
+        registry.register(t)
+    policy = ApprovalPolicy({})
+    agent = Agent("main", ScriptedProvider([
+        {"tool_calls": [("ra", {}), ("act", {}), ("rb", {})]},
+        {"content": "finished"},
+    ]), registry, ToolContext(root=tmp_path), policy, None,
+        ContextManager(ContextConfig()), EventBus(), AgentConfig(), ThinkingConfig(), threading.Event())
+    res = agent.run([{"role": "user", "content": "go"}])
+    assert res.status == "done"
+    # the two reads overlapped (parallel), the action ran after both finished
+    assert max(start["ra"], start["rb"]) < min(done["ra"], done["rb"]), "reads did not overlap"
+    assert start["act"] >= max(done["ra"], done["rb"]), "action ran before the parallel batch finished"
+    # results in the conversation follow the original call order
+    conv = agent.provider.requests[-1]["messages"]
+    texts = [m["content"] for m in conv if m.get("role") == "tool"]
+    assert texts == ["ok:ra", "ok:act", "ok:rb"]
+
+
+def test_steer_injected_next_step(tmp_path):
+    """A steer set while tools run is injected as a user message at the next step."""
+    steer = threading.Event()
+    agent = _make_agent(tmp_path, ScriptedProvider([
+        {"tool_calls": [("read_file", {"path": "x.txt"})]},
+        {"content": "done"},
+    ]))
+    agent.steer = steer
+    agent._steer_prompt = lambda: "STEER-MSG: do X instead"
+    # set the steer right after the first model reply (tool is running)
+    orig_run = agent._run_tool
+
+    def run_tool(tc):
+        steer.set()
+        return orig_run(tc)
+
+    agent._run_tool = run_tool
+    res = agent.run([{"role": "user", "content": "work"}])
+    assert res.status == "done"
+    assert any(m.get("role") == "user" and "STEER-MSG" in str(m.get("content"))
+               for m in agent.provider.requests[-1]["messages"])
+
+
+def test_approval_reject_and_allow(tmp_path):
+    """A write the policy marks 'ask': rejection feeds back to the model,
+    approval lets the tool run; both decisions land in the audit log."""
+    import json as _json
+
+    policy = ApprovalPolicy({"files": {"default": "ask", "allow": []}})  # no root: no path auto-approval
+    answers = iter([ApprovalResponse(False, "not now"), ApprovalResponse(True)])
+    agent = _make_agent(tmp_path, ScriptedProvider([
+        {"tool_calls": [("write_file", {"path": "out.txt", "content": "hello"})]},
+        {"tool_calls": [("write_file", {"path": "out.txt", "content": "hello"})]},
+        {"content": "done"},
+    ]), None)
+    agent.policy = policy
+    agent.approver = lambda req: next(answers)
+    res = agent.run([{"role": "user", "content": "write it"}])
+    assert res.status == "done"
+    conv = agent.provider.requests[-1]["messages"]
+    tool_texts = [m["content"] for m in conv if m.get("role") == "tool"]
+    assert any("REJECTED by the user" in t and "not now" in t for t in tool_texts)
+    assert any("out.txt" in t for t in tool_texts)  # the approved write ran
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "hello"
+    # audit log records both decisions
+    lines = [_json.loads(l) for l in (tmp_path / ".agent" / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [l["decision"] for l in lines] == ["reject", "allow"]
+    assert all(l["tool"] == "write_file" for l in lines)
 
 
 def test_effort_rejection_drops_field_and_notifies():

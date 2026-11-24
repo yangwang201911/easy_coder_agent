@@ -15,16 +15,13 @@ set FAILED=
 
 if "%TARGET%"=="all" call :run_backend
 if "%TARGET%"=="backend" goto summary
-
-if "%TARGET%"=="gui" goto run_gui_all
-if "%TARGET%"=="remote" (
-  echo (remote test needs a standalone server on 127.0.0.1:8931 - start it first)
-  call :run_gui remote
+if "%TARGET%"=="all" (
+  call :run_gui
   goto summary
 )
-if "%TARGET%"=="all" goto run_gui_all
 
-rem single GUI test by name
+rem single GUI suite name (boot, theme, split, proj, ...) - run_all_tests.cjs
+rem auto-discovers every cdp_*_test.cjs, so no list is kept here
 call :run_gui %TARGET%
 goto summary
 
@@ -34,14 +31,10 @@ call backend\.venv\Scripts\python -m pytest backend\tests\ -q
 if errorlevel 1 set FAILED=%FAILED% backend
 exit /b 0
 
-:run_gui_all
-for %%t in (boot theme split proj proj_switch ctxmenu files local_add localpick restart_close debug) do call :run_gui %%t
-exit /b 0
-
 :run_gui
 echo === gui: %1 ===
 pushd gui
-call node cdp_%1_test.cjs
+call node run_all_tests.cjs %1
 if errorlevel 1 set FAILED=%FAILED% %1
 popd
 exit /b 0
