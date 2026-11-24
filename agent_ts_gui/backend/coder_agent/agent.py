@@ -306,7 +306,10 @@ class Agent:
                 on_append(msg)
 
         seen: dict[str, int] = {}
+        seen_at: dict[str, int] = {}  # mutation count when the call was last seen
+        last_result: dict[str, str] = {}  # last result text per call key
         strikes = 0
+        mutations = 0  # writes/execs since the turn started
         cutoffs = 0
         known = set(self.registry.names())
         final_text = ""
@@ -406,10 +409,21 @@ class Agent:
                         add({"role": "tool", "tool_call_id": tc.id, "content": "Cancelled by the user before running."})
                         continue
                     key = tc.name + "|" + tc.arguments
+                    # A write/exec since the previous identical call means the agent changed
+                    # something (e.g. re-running the same test after an edit): that is a
+                    # debug iteration, not a loop - reset the counter for this call.
+                    if key in seen_at and seen_at[key] != mutations:
+                        seen[key] = 0
                     seen[key] = seen.get(key, 0) + 1
-                    near = [k for k in seen if k != key and k.startswith(tc.name + "|")
+                    seen_at[key] = mutations
+                    near = [k for k in last_result if k != key and k.startswith(tc.name + "|")
                             and difflib.SequenceMatcher(None, k, key).ratio() > 0.85]
-                    if seen[key] > self.cfg.loop_limit or (near and seen[key] > 1):
+                    dup = seen[key] > self.cfg.loop_limit
+                    if not dup and seen[key] > 1:
+                        # a nearly identical call that returned the SAME result as this
+                        # one's previous run: the agent is flailing, not iterating
+                        dup = any(last_result.get(k) and last_result.get(k) == last_result.get(key) for k in near)
+                    if dup:
                         strikes += 1
                         result = (
                             "ERROR: you already made this call (or a nearly identical one) several times with "
@@ -419,6 +433,10 @@ class Agent:
                         images = []
                     else:
                         result, images = results[tc.id]
+                        last_result[key] = result
+                        t = self.registry.get(tc.name)
+                        if t is not None and t.kind in ("write", "exec"):
+                            mutations += 1
                     if images and not self._images_supported():
                         result += "\n[image omitted: the configured model is text-only]"
                         images = []
