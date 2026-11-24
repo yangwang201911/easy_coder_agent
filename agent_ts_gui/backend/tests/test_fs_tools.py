@@ -91,6 +91,71 @@ def test_apply_patch_no_hint_when_nothing_close(ctx, tmp_path):
     assert "Closest lines" not in str(e.value)
 
 
+# ---------------------------------------------------------- edit_file (multi-edit, atomic)
+def test_edit_file_multi_applies_in_order(ctx, tmp_path):
+    (tmp_path / "a.py").write_text("def foo():\n    return 42\n\ndef bar():\n    return 7\n", encoding="utf-8")
+    fs.read_file(ctx, {"path": "a.py"})
+    out = fs.edit_file(ctx, {"path": "a.py", "edits": [
+        {"search": "return 42", "replace": "return 43"},
+        {"search": "return 7", "replace": "return 8"},
+    ]})
+    assert "2 replacements" in out
+    text = (tmp_path / "a.py").read_text(encoding="utf-8")
+    assert "return 43" in text and "return 8" in text
+
+
+def test_edit_file_second_edit_builds_on_first(ctx, tmp_path):
+    """Edits are applied in order: the second search sees the first edit's result."""
+    (tmp_path / "a.txt").write_text("aaa\n", encoding="utf-8")
+    fs.read_file(ctx, {"path": "a.txt"})
+    fs.edit_file(ctx, {"path": "a.txt", "edits": [
+        {"search": "aaa", "replace": "bbb"},
+        {"search": "bbb", "replace": "ccc"},
+    ]})
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "ccc\n"
+
+
+def test_edit_file_atomic_on_late_failure(ctx, tmp_path):
+    """If a later edit fails, NOTHING is written (not even the earlier edits)."""
+    (tmp_path / "a.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    fs.read_file(ctx, {"path": "a.txt"})
+    with pytest.raises(ToolError) as e:
+        fs.edit_file(ctx, {"path": "a.txt", "edits": [
+            {"search": "one", "replace": "ONE"},
+            {"search": "does-not-exist", "replace": "x"},
+        ]})
+    assert "not found" in str(e.value)
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+def test_edit_file_duplicate_search_fails_atomically(ctx, tmp_path):
+    (tmp_path / "a.txt").write_text("x\nx\n", encoding="utf-8")
+    fs.read_file(ctx, {"path": "a.txt"})
+    with pytest.raises(ToolError):
+        fs.edit_file(ctx, {"path": "a.txt", "edits": [{"search": "x", "replace": "y"}]})
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "x\nx\n"
+
+
+def test_edit_file_rejected_by_stale_check(ctx, tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("one\ntwo\n", encoding="utf-8")
+    fs.read_file(ctx, {"path": "a.txt"})
+    _bump(p)
+    with pytest.raises(ToolError, match="changed on disk"):
+        fs.edit_file(ctx, {"path": "a.txt", "edits": [{"search": "one", "replace": "ONE"}]})
+    assert p.read_text(encoding="utf-8").endswith("# external edit\n")
+
+
+def test_edit_file_recorded_in_snapshot(snap_ctx, tmp_path):
+    snap_ctx.snapshots.begin("t1")
+    (tmp_path / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    fs.read_file(snap_ctx, {"path": "a.txt"})
+    fs.edit_file(snap_ctx, {"path": "a.txt", "edits": [{"search": "one", "replace": "ONE"}]})
+    restored = snap_ctx.snapshots.restore("t1")
+    assert restored == ["a.txt"]
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+
+
 # ------------------------------------------------------- stale detection
 def _bump(path):
     """Make the file's mtime strictly newer than the last read."""

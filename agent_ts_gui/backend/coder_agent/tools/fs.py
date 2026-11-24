@@ -484,6 +484,54 @@ def apply_patch_preview(ctx: ToolContext, a: dict) -> str:
     return _unified(old, new, ctx.rel(path))
 
 
+# --------------------------------------------------------------- edit_file
+def _edits(a: dict) -> list[dict]:
+    """Normalise: 'edits' list (preferred) or a single search/replace pair."""
+    if "edits" in a:
+        edits = a["edits"]
+        if not isinstance(edits, list) or not edits:
+            raise ToolError("'edits' must be a non-empty list of {search, replace, replace_all?}")
+        out = []
+        for i, e in enumerate(edits):
+            if not isinstance(e, dict) or "search" not in e or "replace" not in e:
+                raise ToolError(f"edits[{i}] must be {{search, replace, replace_all?}}")
+            out.append({"search": e["search"], "replace": e["replace"],
+                        "replace_all": bool(e.get("replace_all", False))})
+        return out
+    return [{"search": a["search"], "replace": a["replace"],
+             "replace_all": bool(a.get("replace_all", False))}]
+
+
+def _patched_multi(ctx: ToolContext, a: dict) -> tuple[Path, str, str, bool, int]:
+    """Apply ALL edits to the in-memory content; raise (with no file change) if any fails."""
+    path = ctx.resolve(a["path"])
+    _check_stale(ctx, path)
+    raw = _read_text(path)
+    crlf = "\r\n" in raw
+    text = _norm(raw)
+    n = 0
+    for i, e in enumerate(_edits(a)):
+        text, k = _replace(text, _norm(e["search"]), _norm(e["replace"]), e["replace_all"])
+        n += k
+    return path, _norm(raw), text, crlf, n
+
+
+def edit_file(ctx: ToolContext, a: dict) -> str:
+    """Atomic multi-edit: every edit is applied to the in-memory copy first; the file
+    is written only if ALL of them match. On the first failure nothing is changed."""
+    path, old, new, crlf, n = _patched_multi(ctx, a)
+    if ctx.snapshots:
+        ctx.snapshots.record(path)
+    path.write_text(new.replace("\n", "\r\n") if crlf else new, encoding="utf-8", newline="")
+    ctx.read_mtimes[str(path)] = path.stat().st_mtime_ns
+    return f"Edited {ctx.rel(path)} ({n} replacement{'s' if n != 1 else ''})\n" + _unified(old, new, ctx.rel(path))
+
+
+def edit_file_preview(ctx: ToolContext, a: dict) -> str:
+    path, old, new, _, n = _patched_multi(ctx, a)
+    return _unified(old, new, ctx.rel(path))
+
+
 # ------------------------------------------------- move / delete / make_dir
 def move_path(ctx: ToolContext, a: dict) -> str:
     src = ctx.resolve(a["source"])
@@ -634,6 +682,36 @@ def fs_tools() -> list[Tool]:
             apply_patch,
             kind="write",
             preview=apply_patch_preview,
+        ),
+        Tool(
+            "edit_file",
+            "Apply MULTIPLE exact-text edits to one file atomically. Every edit must match "
+            "(uniquely, unless replace_all); the file is written only if ALL edits succeed, "
+            "so a late failure changes nothing. Prefer this over several apply_patch calls "
+            "when touching the same file.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": P},
+                    "edits": {
+                        "type": "array",
+                        "description": "edits applied in order, each to the result of the previous one",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search": {"type": "string", "description": "exact text to find (unique, include surrounding lines)"},
+                                "replace": {"type": "string", "description": "replacement text"},
+                                "replace_all": {"type": "boolean", "description": "replace every occurrence"},
+                            },
+                            "required": ["search", "replace"],
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+            },
+            edit_file,
+            kind="write",
+            preview=edit_file_preview,
         ),
         Tool(
             "move_path",
