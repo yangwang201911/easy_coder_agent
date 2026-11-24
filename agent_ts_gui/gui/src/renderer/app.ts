@@ -300,6 +300,14 @@ async function refreshServerInfo() {
       "Settings > Context & agent > Detect.");
   }
   tip.push("Click to refresh.");
+  const m = await call("mcp_status");
+  if (m && !m.__error && Object.keys(m.servers ?? {}).length) {
+    const parts = Object.entries(m.servers as Record<string, any>).map(([n, s]: [string, any]) =>
+      s.ok ? `mcp ${n}: ${s.tools} tools` : `mcp ${n}: FAILED (${s.error})`);
+    if (m.lazy) parts.push("mcp: lazy loading (use mcp_search)");
+    tip.push(...parts);
+    if (parts.some((p: string) => p.includes("FAILED"))) btn.className = "flat warn";
+  }
   btn.title = tip.join("\n");
 }
 

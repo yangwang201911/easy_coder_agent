@@ -209,6 +209,7 @@ class Server:
             "test_connection": self.test_connection,
             "context_info": self.context_info,
             "context_estimate": self.context_estimate,
+            "mcp_status": self.mcp_status,
             "task_types": self.task_types,
             "system_prompt": self.system_prompt,
             "prompt_dumps": self.prompt_dumps,
@@ -543,6 +544,11 @@ class Server:
         e = self._require_engine()
         msgs = e.session.build_messages()
         return {"tokens": e.ctx_mgr.tokens(msgs), "max_tokens": e.config.context.max_tokens}
+
+    def mcp_status(self, p: dict) -> dict:
+        """Per-MCP-server state (connected / tools / error) for the GUI."""
+        e = self._require_engine()
+        return {"servers": e.mcp.status(), "lazy": len(e.mcp._lazy) > 0 and "mcp_search" in e.registry.names()}
 
     def task_types(self, p: dict) -> dict:
         e = self._require_engine()

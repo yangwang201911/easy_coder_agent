@@ -61,7 +61,7 @@
 | 5.5 | skills | 中 | 只能失败时被动注入，无 Skill 工具/斜杠调用 | P1 | 🟡 进行中：`use_skill` 工具 + 斜杠调用 |
 | 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ✅ `/plan` 只读探索 → `exit_plan_mode` 审批（计划→todo）→ 执行（🟡 与盲规划 DAG 并存） |
 | 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 | 🟡 grep 增强 + `code_symbols` 已做；缺 LSP/语义 |
-| 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ❌ 仅 stdio |
+| 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ✅ stdio+HTTP/SSE、resources/prompts、readOnlyHint、延迟加载、状态可见 |
 | 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ✅ hooks（`.agent/hooks.toml`）+ 每 turn 用量统计（GUI 展示） |
 | 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 | 🟡 新后端 98 测试通过；旧 `agent/` 目录仍并存待归档 |
 
@@ -386,7 +386,13 @@ flowchart LR
 
 ### 5.14 MCP
 
-**现状（已验证）**：`McpHub` 使用 stdio 客户端加载工具，工具以 `mcp` kind 走审批；存在过泄漏问题（已修复）。
+**现状（已实现）**：
+- **传输**：stdio（`command`）+ Streamable HTTP（`url`，默认）+ 旧版 SSE（`url` + `"transport": "sse"`）；`headers` 支持 `${ENV_VAR}` 展开（密钥放环境变量，不落盘）。
+- **能力**：服务器暴露 resources/prompts 时自动注册 `mcp__<s>__list_resources` / `mcp__<s>__read_resource` / `mcp__<s>__get_prompt`（内容同样走 untrusted 包裹）。
+- **只读提示**：`annotations.readOnlyHint` 为真的工具注册为 `read` kind（可并行、免审批），由 `[mcp] readonly_hint = true`（默认）控制。
+- **延迟加载**：MCP 工具总数 > 20 时不逐个注册，改为 `mcp_search`（按名/描述搜索并把命中工具加载进 registry，agent 每步刷新工具表）+ `mcp_call`（按全名直接执行）。
+- **生命周期**：`mcp_status` RPC 报告每 server 的连接状态/工具数/错误，GUI server 缓存按钮 tooltip 中显示（失败标 warn）；单个 server 失败不影响其他；调用受 `ctx.cancel` 传播取消。
+- 未做：热重载/单 server 开关、新 server 首次启用的确认。
 
 **差距与方案**
 1. 传输：增加 Streamable HTTP/SSE，支持 `headers` 与环境变量引用（密钥不落盘到明文配置）。

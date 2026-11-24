@@ -53,7 +53,8 @@ class Engine:
         self.sections = PromptSections()
         self.ctx_mgr = ContextManager(config.context)
         self.registry: ToolRegistry = default_registry()
-        self.mcp = McpHub(load_servers(self.root, self.policy.data))
+        self.mcp = McpHub(load_servers(self.root, self.policy.data),
+                         readonly_hint=(self.policy.data.get("mcp") or {}).get("readonly_hint", True))
         self.mcp_tool_names: list[str] = []
         for t in self.mcp.start():
             self.registry.register(t)
