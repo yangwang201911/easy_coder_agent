@@ -166,6 +166,7 @@ const S = {
   turnStart: 0,
   approvalPolicy: null as string | null, // user approval policy text (for the input footer chip)
   sessionApprove: false, // "allow all in this session" is active (reset on new session / project)
+  permMode: "default" as string, // permission mode: default | accept_edits | plan | bypass
   attachments: [] as { name: string; data_url: string }[],
   fileAttached: null as string | null,
   toolPaths: new Map<string, string>(), // tool_call id -> file path (for clickable results)
@@ -364,12 +365,21 @@ function refreshApprovalLabel() {
   if (S.sessionApprove) {
     text.textContent = "Allow all in this session";
     btn.title = "Everything not denied in the approval policy runs without asking, until this session ends (new session / project resets it).\nClick to open Settings > Approval";
+  } else if (S.permMode === "bypass") {
+    text.textContent = "Bypass";
+    btn.title = "All tools run without asking (no approval prompts).\nClick to change mode";
+  } else if (S.permMode === "accept_edits") {
+    text.textContent = "Accept edits";
+    btn.title = "File writes in trusted paths are auto-approved; commands/network still ask.\nClick to change mode";
+  } else if (S.permMode === "plan") {
+    text.textContent = "Plan (read-only)";
+    btn.title = "Read-only mode: no writes, commands, network or MCP allowed.\nClick to change mode";
   } else if (auto) {
     text.textContent = "Auto-approve";
     btn.title = `Approval policy: auto_approve_all = true\nClick to open Settings > Approval`;
   } else {
     text.textContent = "Default permissions";
-    btn.title = "Ask before running commands / writing files\nClick to open Settings > Approval";
+    btn.title = "Ask before running commands / writing files\nClick to change mode";
   }
 }
 
@@ -417,6 +427,7 @@ async function openProject(root: string, sessionId: string | null = null) {
   reloadTaskTypes();
   refreshModelLabel();
   refreshApprovalLabel();
+  call("get_mode").then((r) => { if (r && !r.__error && r.mode) { S.permMode = r.mode; refreshApprovalLabel(); } });
   void (async () => {
     const r = await call("approval_policy");
     if (r && !r.__error) { S.approvalPolicy = r.text; refreshApprovalLabel(); }
@@ -3154,9 +3165,26 @@ $("conn-mode-label").addEventListener("click", () => {
   if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
   void settingsDialog("connection").then((saved) => { if (saved) { refreshConnLabel(); chat.line("\n[settings saved]", "c-ok"); } });
 });
-$("approval-label").addEventListener("click", () => {
-  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
-  void settingsDialog("approval").then((saved) => { if (saved) { refreshApprovalLabel(); chat.line("\n[settings saved]", "c-ok"); } });
+$("approval-label").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const modes = [
+    { v: "default", label: "Default (ask before writes/commands)" },
+    { v: "accept_edits", label: "Accept edits (auto-approve file writes)" },
+    { v: "plan", label: "Plan (read-only)" },
+    { v: "bypass", label: "Bypass (no approval prompts)" },
+  ];
+  showMenu(rect.left, rect.top - modes.length * 22 - 4, modes.map((m) => ({
+    label: m.label + (m.v === S.permMode ? "  ✓" : ""),
+    fn: () => {
+      S.permMode = m.v;
+      refreshApprovalLabel();
+      call("set_mode", { mode: m.v }).then((r) => {
+        if (r && r.__error) chat.line(`\n[mode] ${r.__error}`, "c-error");
+        else chat.line(`\n[mode] ${m.v}`, "c-ok");
+      });
+    },
+  })));
 });
 // chat view toolbar: jump to the turns list
 $("chat-turns-btn").addEventListener("click", () => switchLeftTab("turns"));

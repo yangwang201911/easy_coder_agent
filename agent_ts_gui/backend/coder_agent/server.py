@@ -235,6 +235,8 @@ class Server:
             "terminal_list": self.terminal_list,
             "skill_body": self.skill_body,
             "compact": self.compact,
+            "set_mode": self.set_mode,
+            "get_mode": self.get_mode,
         }
 
     @property
@@ -390,6 +392,21 @@ class Server:
         if self._busy:
             raise RuntimeError("a turn is running - cannot compact now")
         return e.compact(str(p.get("hint", "")))
+
+    def set_mode(self, p: dict) -> dict:
+        """Set the permission mode: default | accept_edits | plan | bypass."""
+        e = self._require_engine()
+        mode = str(p.get("mode", "default"))
+        if mode not in ("default", "accept_edits", "plan", "bypass"):
+            return {"error": f"invalid mode '{mode}'", "available": ["default", "accept_edits", "plan", "bypass"]}
+        e.policy.mode = mode
+        self.bus.emit("mode_changed", mode=mode)
+        return {"ok": True, "mode": mode}
+
+    def get_mode(self, p: dict) -> dict:
+        """Get the current permission mode."""
+        e = self._require_engine()
+        return {"mode": e.policy.mode}
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.
