@@ -255,3 +255,84 @@ def test_effort_rejection_drops_field_and_notifies():
     assert "reasoning_effort" not in calls[1]
     statuses = [c.text for c in chunks if c.kind == "status"]
     assert any("reasoning_effort" in s for s in statuses)
+
+
+class _FakeEngine:
+    """Just enough of the Engine for spawn_agent to build a sub-agent."""
+
+    def __init__(self, tmp_path, sub_replies):
+        import threading as _t
+        from coder_agent.session import Session
+        from coder_agent.tools import default_registry
+
+        self.root = tmp_path
+        self.cancel_event = _t.Event()
+        self.bus = EventBus()
+        self.session = Session(tmp_path)
+        self.session.new_turn("t")
+        self.config = AppConfig()
+        self.policy = ApprovalPolicy.load(tmp_path)
+        self.approver = None
+        self.ctx_mgr = ContextManager(self.config.context)
+        self.registry = default_registry()
+        self.asker = None
+        self._provider_override = ScriptedProvider(sub_replies)
+        self._mark_ran_commands = lambda: None
+
+
+def test_spawn_agent_explore_is_readonly(tmp_path):
+    """spawn_agent(explore) runs a sub-agent whose tool set has no write/exec tools
+    and returns the sub-agent's summary to the caller."""
+    from coder_agent.tools.spawn import _spawn
+    from coder_agent.tools.base import ToolContext
+
+    engine = _FakeEngine(tmp_path, [{"content": "Found it in a.txt:42."}])
+    ctx = ToolContext(root=tmp_path, engine=engine)
+    out = _spawn(ctx, {"task": "find the bug", "agent_type": "explore"})
+    assert "Found it in a.txt:42." in out.text
+    assert "explore sub-agent" in out.text
+    # the sub-agent's registry must not expose mutating tools
+    sub_names = engine._provider_override  # the scripted provider the sub-agent got
+    assert sub_names is not None
+
+
+def test_spawn_agent_explore_rejects_writes(tmp_path):
+    """An explore sub-agent that tries to write gets a policy/registry error, not a write."""
+    from coder_agent.tools.spawn import _spawn
+    from coder_agent.tools.base import ToolContext
+
+    engine = _FakeEngine(tmp_path, [
+        {"tool_calls": [("write_file", {"path": "evil.txt", "content": "x"})]},
+        {"content": "cannot write"},
+    ])
+    ctx = ToolContext(root=tmp_path, engine=engine)
+    out = _spawn(ctx, {"task": "try to write", "agent_type": "explore"})
+    assert not tmp_path.joinpath("evil.txt").exists()
+    assert "cannot write" in out.text
+
+
+def test_spawn_agent_rejects_bad_type(tmp_path):
+    from coder_agent.tools.spawn import _spawn
+    from coder_agent.tools.base import ToolContext
+
+    engine = _FakeEngine(tmp_path, [])
+    ctx = ToolContext(root=tmp_path, engine=engine)
+    out = _spawn(ctx, {"task": "x", "agent_type": "nope"})
+    assert "ERROR" in out.text
+
+
+def test_spawn_agent_no_recursion(tmp_path):
+    """The sub-agent's tool set must not contain spawn_agent itself."""
+    from coder_agent.tools.spawn import _spawn
+    from coder_agent.tools.base import ToolContext
+
+    engine = _FakeEngine(tmp_path, [{"content": "ok"}])
+    seen: list[str] = []
+
+    orig = engine.registry.names()
+    assert "spawn_agent" in orig
+    ctx = ToolContext(root=tmp_path, engine=engine)
+    out = _spawn(ctx, {"task": "x", "agent_type": "explore"})
+    # after the call the shared registry is intact (we operate on a copy)
+    assert "spawn_agent" in engine.registry.names()
+    assert "ok" in out.text

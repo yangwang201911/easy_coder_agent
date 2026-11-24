@@ -32,6 +32,7 @@ class ToolContext:
     extra_roots: list[Path] = field(default_factory=list)  # trusted dirs outside the root (read + write), from the approval policy
     ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
     shell: Any = None  # ShellManager for the persistent shell tools (lazy)
+    engine: Any = None  # the owning Engine (spawn_agent uses it to build sub-agents)
     todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
     turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
     read_mtimes: dict = field(default_factory=dict)  # path -> st_mtime_ns of the last read_file (stale-write detection)
@@ -116,6 +117,9 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
 
@@ -130,6 +134,14 @@ class ToolRegistry:
         for n in names:
             if n in self._tools:
                 sub.register(self._tools[n])
+        return sub
+
+    def readonly(self) -> "ToolRegistry":
+        """Only the non-mutating tools (read/action/network) - for explore sub-agents."""
+        sub = ToolRegistry()
+        for t in self._tools.values():
+            if t.kind in ("read", "action", "network"):
+                sub.register(t)
         return sub
 
     def normalize_args(self, tool: Tool, args: dict) -> dict:

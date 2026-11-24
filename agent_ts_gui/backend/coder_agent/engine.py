@@ -97,6 +97,12 @@ class Engine:
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def _mark_ran_commands(self) -> None:
+        """A sub-agent ran shell commands: the current turn has side effects (no rollback)."""
+        path = self.session.path()
+        if path:
+            path[-1].ran_commands = True
+
     def steer(self, prompt: str) -> None:
         """Queue a user message for the running turn (the GUI's "send while running").
 
@@ -154,6 +160,7 @@ class Engine:
                 extra_roots=self.policy.extra_roots,
                 ask_user=self.asker,
                 todos=list(prev_todos),
+                engine=self,
             )
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,

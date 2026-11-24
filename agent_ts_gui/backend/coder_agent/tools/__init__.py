@@ -12,13 +12,14 @@ from .browser import browser_tools
 from .web import web_tools
 from .vision import view_image_tool
 from .symbols import code_symbols_tool
+from .spawn import spawn_agent_tool
 
 
 def default_registry() -> ToolRegistry:
     from ..knowledge import memory_tools, use_skill_tool  # local import: knowledge depends on tools.base
 
     reg = ToolRegistry()
-    for t in [*fs_tools(), *shell_tools(), *git_tools(), *debug_tools(), *memory_tools(), *web_tools(), *browser_tools(), *interact_tools(), view_image_tool(), code_symbols_tool(), use_skill_tool()]:
+    for t in [*fs_tools(), *shell_tools(), *git_tools(), *debug_tools(), *memory_tools(), *web_tools(), *browser_tools(), *interact_tools(), view_image_tool(), code_symbols_tool(), use_skill_tool(), spawn_agent_tool()]:
         reg.register(t)
     return reg
 
