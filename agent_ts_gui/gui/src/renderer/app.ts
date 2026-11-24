@@ -1381,7 +1381,7 @@ async function answerQuietly(reqId: string, response: Record<string, any>) {
 
 async function approvalDialog(req: Record<string, any>): Promise<Record<string, any> | undefined> {
   const what = req.kind === "command" ? "Run command" : req.kind === "network" ? "Network access"
-    : req.kind === "mcp" ? "MCP tool" : "Write file";
+    : req.kind === "mcp" ? "MCP tool" : req.kind === "read" ? "Read sensitive file" : "Write file";
   const rule = String(req.suggested_rule ?? "");
   const rows: PanelRow[] = [{ label: "Allow once" }, { label: "Allow all in this session" }];
   const ruleIdx = rule ? rows.push({

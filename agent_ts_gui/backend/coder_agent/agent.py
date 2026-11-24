@@ -109,6 +109,17 @@ class Agent:
 
     # -------------------------------------------------------------- events
     def _emit(self, kind: str, **data) -> None:
+        if kind == "approval_resolved":
+            from . import audit
+
+            audit.record(
+                self.tool_ctx.root,
+                tool=data.get("tool", ""),
+                args=data.get("args", {}),
+                decision="allow" if data.get("allow") else ("deny" if data.get("auto") else "reject"),
+                reason=str(data.get("reason", "")),
+                auto=bool(data.get("auto")),
+            )
         self.bus.emit(kind, self.id, **data)
 
     # ----------------------------------------------------------- compaction
@@ -250,7 +261,32 @@ class Agent:
 
     def _authorise(self, tool, args: dict) -> Optional[str]:
         """Return an error text if the call must not run, else None."""
-        if tool.kind in ("read", "action"):  # actions (browser clicks, todos, ...) need no approval
+        if tool.kind in ("read", "action"):
+            # actions (browser clicks, todos, ...) need no approval; read tools
+            # only when they touch a sensitive file (secrets, keys)
+            if tool.kind == "read" and "path" in args:
+                try:
+                    subject = self.tool_ctx.rel(self.tool_ctx.resolve(str(args["path"])))
+                except Exception:
+                    subject = str(args["path"])
+                decision = self.policy.check_read(subject)
+                if decision.action == "allow":
+                    return None
+                if decision.action == "deny":
+                    self._emit("approval_resolved", tool=tool.name, args=args, allow=False, auto=True, reason=decision.reason)
+                    return f"DENIED by policy ({decision.reason}). Do not retry this; choose a different approach."
+                req = ApprovalRequest(
+                    kind="read", tool=tool.name, title=subject,
+                    detail=f"Read sensitive file: {subject}", args=args,
+                    suggested_rule=self.policy.suggest_rule("write", {"path": subject}),
+                )
+                self._emit("status", state="waiting_user", detail=req.title)
+                self._emit("approval_requested", request=req)
+                resp = self.approver(req) if self.approver else ApprovalResponse(False, "no approver available")
+                self._emit("approval_resolved", tool=tool.name, args=args, allow=resp.allow, auto=False, reason=resp.feedback)
+                if not resp.allow:
+                    fb = f" User feedback: {resp.feedback}" if resp.feedback else ""
+                    return f"REJECTED by the user.{fb}"
             return None
         ctx = self.tool_ctx
         if tool.kind == "network":
@@ -278,10 +314,10 @@ class Agent:
             decision = self.policy.check_write(subject)
 
         if decision.action == "deny":
-            self._emit("approval_resolved", allow=False, auto=True, reason=decision.reason)
+            self._emit("approval_resolved", tool=tool.name, args=args, allow=False, auto=True, reason=decision.reason)
             return f"DENIED by policy ({decision.reason}). Do not retry this; choose a different approach."
         if decision.action == "allow":
-            self._emit("approval_resolved", allow=True, auto=True, reason=decision.reason)
+            self._emit("approval_resolved", tool=tool.name, args=args, allow=True, auto=True, reason=decision.reason)
             return None
 
         try:
@@ -305,7 +341,7 @@ class Agent:
         self._emit("status", state="waiting_user", detail=req.title)
         self._emit("approval_requested", request=req)
         resp = self.approver(req) if self.approver else ApprovalResponse(False, "no approver available")
-        self._emit("approval_resolved", allow=resp.allow, auto=False, reason=resp.feedback)
+        self._emit("approval_resolved", tool=tool.name, args=args, allow=resp.allow, auto=False, reason=resp.feedback)
         if resp.allow and resp.remember_rule:
             self.policy.remember(kind, resp.remember_rule, resp.remember_scope)
         if not resp.allow:

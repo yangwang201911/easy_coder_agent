@@ -453,9 +453,26 @@ class ApprovalPolicy:
                 return Decision("allow", f"matches allow pattern '{g}'")
         return self._default("mcp")
 
+    SENSITIVE_READ = re.compile(
+        r"(\.env(\..+)?$|(^|/)\.ssh(/|$)|id_(rsa|ed25519|ecdsa)(\.pub)?$|\.pem$|\.key$|"
+        r"(^|/)secrets?(/|$)|(^|/)credentials(\.json)?$|\.netrc$|\.aws(/|$))",
+        re.I,
+    )
+
+    def check_read(self, rel_path: str) -> Decision:
+        """Sensitive files (secrets, keys) need approval even for reading."""
+        p = rel_path.replace("\\", "/")
+        if self.SENSITIVE_READ.search(p):
+            if self.data.get("auto_approve_all") or self.session_approve:
+                return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
+            return Decision("ask", "sensitive file (secrets/keys)")
+        return Decision("allow", "not sensitive")
+
     def check_write(self, rel_path: str) -> Decision:
         cfg = self.data.get("files", {})
         p = rel_path.replace("\\", "/")
+        if ".git" in p.split("/"):
+            return Decision("deny", "writing into .git is not allowed")
         abs_p: Optional[Path] = None
         names = [p]  # what the globs are matched against: as given + relative to its trusted root
         if self.root is not None:
