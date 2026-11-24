@@ -125,7 +125,7 @@ def interact_tools() -> list[Tool]:
                 "required": ["todos"],
             },
             func=update_todo,
-            kind="read",
+            kind="action",  # mutates the checklist: must run serially, in call order
         ),
         Tool(
             name="ask_user",
@@ -149,6 +149,6 @@ def interact_tools() -> list[Tool]:
                 "required": ["question"],
             },
             func=ask_user,
-            kind="read",
+            kind="action",  # blocks on the user: must never run in parallel
         )
     ]

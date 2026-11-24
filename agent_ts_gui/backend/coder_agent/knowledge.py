@@ -237,5 +237,6 @@ def memory_tools() -> list[Tool]:
                 "required": ["note"],
             },
             remember,
+            kind="action",  # writes a memory file: must run serially, in call order
         )
     ]

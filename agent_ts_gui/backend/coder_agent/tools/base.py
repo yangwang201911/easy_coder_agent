@@ -80,7 +80,7 @@ class Tool:
     description: str
     parameters: dict  # JSON schema
     func: Callable[[ToolContext, dict], "str | ToolOutput"]
-    kind: str = "read"  # read | write | exec
+    kind: str = "read"  # read (parallel, no approval) | action (serial, no approval) | write | exec | network | mcp
     preview: Optional[Callable[[ToolContext, dict], str]] = None  # diff / detail for approval
     command_of: Optional[Callable[[dict], str]] = None  # exec tools: the command line the approval policy judges
     target_of: Optional[Callable[[dict], str]] = None  # network tools: the host the approval policy judges

@@ -233,7 +233,7 @@ class Agent:
 
     def _authorise(self, tool, args: dict) -> Optional[str]:
         """Return an error text if the call must not run, else None."""
-        if tool.kind == "read":
+        if tool.kind in ("read", "action"):  # actions (browser clicks, todos, ...) need no approval
             return None
         ctx = self.tool_ctx
         if tool.kind == "network":

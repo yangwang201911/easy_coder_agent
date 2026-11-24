@@ -397,7 +397,7 @@ def browser_tools() -> list[Tool]:
             description="Click an element by ref from the latest browser_snapshot.",
             parameters={"type": "object", "properties": {"ref": ref_param}, "required": ["ref"]},
             func=browser_click,
-            kind="read",
+            kind="action",  # mutates the page: must run serially, in call order
         ),
         Tool(
             name="browser_type",
@@ -412,7 +412,7 @@ def browser_tools() -> list[Tool]:
                 "required": ["ref", "text"],
             },
             func=browser_type,
-            kind="read",
+            kind="action",  # mutates the page: must run serially, in call order
         ),
         Tool(
             name="browser_take_screenshot",
@@ -451,14 +451,14 @@ def browser_tools() -> list[Tool]:
                 "required": ["index"],
             },
             func=browser_switch_tab,
-            kind="read",
+            kind="action",  # mutates browser state: must run serially, in call order
         ),
         Tool(
             name="browser_close",
             description="Close the browser (all tabs).",
             parameters={"type": "object", "properties": {}},
             func=browser_close,
-            kind="read",
+            kind="action",
         ),
         Tool(
             name="web_open",
