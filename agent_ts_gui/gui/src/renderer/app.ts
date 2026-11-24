@@ -2312,7 +2312,15 @@ async function send() {
   // starts a fresh session and enters it first. Resolve the attached file
   // BEFORE that (startNewSession clears the file view and would silently
   // drop the attachment).
-  let fullPrompt = await withAttachedFile(prompt);
+  // /plan: run this turn in plan mode (read-only explore -> user approves the plan)
+  let planMode = false;
+  let promptText = prompt;
+  if (/^\/plan\b/.test(promptText)) {
+    planMode = true;
+    promptText = promptText.replace(/^\/plan\s*/, "").trim();
+    if (!promptText) { chat.line("\n[error] /plan needs a task, e.g. /plan add a settings page", "c-error"); return; }
+  }
+  let fullPrompt = await withAttachedFile(promptText);
   // /compact: user-triggered context compaction (summarises the conversation)
   if (/^\/compact\b/.test(prompt)) {
     const hint = prompt.replace(/^\/compact\s*/, "").trim();
@@ -2363,7 +2371,8 @@ async function send() {
     call("submit_plan", { goal: fullPrompt }).then((r) => afterSubmit(r));
   } else {
     // effort: the GUI selector ("default" = use the saved setting)
-    call("submit", { prompt: fullPrompt, task_type: taskType, images, effort: S.effort === "default" ? null : S.effort }).then((r) => afterSubmit(r));
+    if (planMode) chat.line("\n[plan mode: read-only explore; you will approve the plan before execution]", "c-soft");
+    call("submit", { prompt: fullPrompt, task_type: taskType, images, effort: S.effort === "default" ? null : S.effort, plan: planMode }).then((r) => afterSubmit(r));
   }
 }
 

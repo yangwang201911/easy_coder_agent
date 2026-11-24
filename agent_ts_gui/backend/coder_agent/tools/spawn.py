@@ -45,6 +45,9 @@ def _spawn(ctx: ToolContext, args: dict) -> ToolOutput:
     parent = getattr(ctx, "engine", None)
     if parent is None:
         return ToolOutput("ERROR: spawn_agent is unavailable in this context")
+    # plan mode stays read-only: only explore sub-agents are allowed
+    if agent_type == "general" and getattr(getattr(ctx, "agent", None), "plan_mode", False):
+        return ToolOutput("ERROR: plan mode is read-only - use agent_type='explore' (general sub-agents can write)")
 
     # build an isolated sub-agent: fresh context, its own ToolContext, no spawn_agent
     if agent_type == "explore":

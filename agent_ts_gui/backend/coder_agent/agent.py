@@ -83,11 +83,15 @@ class Agent:
         cancel: threading.Event,
         steer: Optional[threading.Event] = None,
         steer_prompt: Optional[Callable[[], str]] = None,
+        plan_mode: bool = False,
     ) -> None:
         self.id = agent_id
         set_agent_id(agent_id)  # labelled in prompt dumps (thread-local)
         self.provider = provider
         self.registry = registry
+        # Plan mode: the agent explores with read-only tools and must call
+        # exit_plan_mode (user approval) before any mutation is possible.
+        self.plan_mode = plan_mode
         self.tool_ctx = tool_ctx
         self.policy = policy
         self.approver = approver
@@ -106,6 +110,7 @@ class Agent:
         self._injected: set[str] = set()  # skills already injected during this run
         self._touched: list[str] = []  # file paths read/written this turn (re-injected after compression)
         self._tools = registry.schemas()
+        self._known_tools = set(registry.names())  # refreshed each step (exit_plan_mode swaps the registry)
 
     # -------------------------------------------------------------- events
     def _emit(self, kind: str, **data) -> None:
@@ -363,7 +368,6 @@ class Agent:
         strikes = 0
         mutations = 0  # writes/execs since the turn started
         cutoffs = 0
-        known = set(self.registry.names())
         final_text = ""
         try:
             for step in range(1, self.cfg.max_steps + 1):
@@ -376,6 +380,9 @@ class Agent:
                     prompt = self._steer_prompt() if self._steer_prompt else ""
                     add({"role": "user", "content": prompt})
                     self._emit("steer_injected", text=prompt)
+                # exit_plan_mode may have swapped the registry mid-run: refresh names/schemas
+                self._known_tools = set(self.registry.names())
+                self._tools = self.registry.schemas()
                 self._maybe_compress(messages, on_compact)
                 self._emit("status", state="waiting_model", detail=f"step {step}")
 
@@ -415,7 +422,7 @@ class Agent:
                                ratio=used / max(1, self.ctx_mgr.cfg.max_tokens), exact=True)
 
                 if not calls and text:
-                    text, calls = extract_text_tool_calls(text, known)
+                    text, calls = extract_text_tool_calls(text, self._known_tools)
 
                 msg: dict = {"role": "assistant", "content": text}
                 if calls:

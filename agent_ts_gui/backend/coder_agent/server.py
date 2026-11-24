@@ -371,7 +371,8 @@ class Server:
         prompt, task_type = p.get("prompt", ""), p.get("task_type")
         images = _validate_images(p.get("images"))
         effort = p.get("effort")
-        return self._start_turn(lambda: e.submit(prompt, task_type, images, effort))
+        plan = bool(p.get("plan", False))
+        return self._start_turn(lambda: e.submit(prompt, task_type, images, effort, plan=plan))
 
     def skill_body(self, p: dict) -> dict:
         """Full body of a skill by name (for the GUI's ``/skill-name`` slash command)."""

@@ -123,13 +123,16 @@ class Engine:
         task_type: Optional[str] = None,
         images: Optional[list[dict]] = None,
         effort: Optional[str] = None,
+        plan: bool = False,
     ) -> AgentResult:
         """Run one user turn to completion (blocking - call from a worker thread).
 
         ``images``: [{"name": str, "data_url": "data:image/..."}] sent to the model
         as image_url parts of the user message (needs a vision-capable model).
         ``effort``: thinking effort for this turn (GUI selector); overrides the
-        saved setting when given."""
+        saved setting when given.
+        ``plan``: plan mode - the agent explores with read-only tools and must
+        call exit_plan_mode (user approval) before it may write anything."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
         turn: Optional[Turn] = None
@@ -162,12 +165,28 @@ class Engine:
                 todos=list(prev_todos),
                 engine=self,
             )
+            # plan mode: explore with read-only tools; exit_plan_mode (user approval)
+            # swaps in the full registry mid-run
+            if plan:
+                registry = registry.readonly()
+                tool_ctx.todos = []
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,
                 self.ctx_mgr, self.bus, self.config.agent, self.config.thinking, self.cancel_event,
                 steer=self._steer_event, steer_prompt=lambda: self._steer_prompt,
+                plan_mode=plan,
             )
+            tool_ctx.agent = agent
             system = PromptBuilder(self.root, self.task_types, self.sections).build(tt)
+            if plan:
+                system += (
+                    "\n\n# PLAN MODE (this turn)\n"
+                    "You are in plan mode: you can ONLY read/explore (files, search, web). "
+                    "You cannot write files, run commands or use git. Explore the codebase thoroughly, "
+                    "then call exit_plan_mode with a concrete plan as markdown (bullet steps, naming the "
+                    "files to touch). The user must approve it; only after approval do you get write access. "
+                    "If the user rejects the plan, revise it and call exit_plan_mode again."
+                )
             messages = [{"role": "system", "content": system}, *self.session.build_messages()]
 
             def on_append(msg: dict) -> None:

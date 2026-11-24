@@ -321,6 +321,58 @@ def test_spawn_agent_rejects_bad_type(tmp_path):
     assert "ERROR" in out.text
 
 
+def _make_plan_agent(tmp_path, replies, answer):
+    from types import SimpleNamespace
+    from coder_agent.tools import default_registry
+
+    provider = ScriptedProvider(replies)
+    registry = default_registry()
+    policy = ApprovalPolicy.load(tmp_path)
+    tool_ctx = ToolContext(root=tmp_path, ask_user=lambda q: {"answer": answer})
+    agent = Agent("main", provider, registry.readonly(), tool_ctx, policy, None,
+                  ContextManager(ContextConfig()), EventBus(),
+                  AgentConfig(), ThinkingConfig(), threading.Event(), plan_mode=True)
+    tool_ctx.agent = agent
+    tool_ctx.engine = SimpleNamespace(registry=registry)
+    return agent, tool_ctx
+
+
+def test_plan_mode_readonly_until_approved(tmp_path):
+    """In plan mode a write fails (not in the read-only registry); after the user
+    approves exit_plan_mode the same write succeeds and the plan becomes the todos."""
+    replies = [
+        {"tool_calls": [("write_file", {"path": "a.txt", "content": "pre"})]},
+        {"tool_calls": [("exit_plan_mode", {"plan_markdown": "- edit a.txt\n- run the tests"})]},
+        {"tool_calls": [("write_file", {"path": "a.txt", "content": "post"})]},
+        {"content": "done"},
+    ]
+    agent, tool_ctx = _make_plan_agent(tmp_path, replies, "Approve - start executing")
+    res = agent.run([{"role": "user", "content": "plan a change"}])
+    assert res.status == "done", res.error
+    # the pre-approval write was refused (unknown tool in the read-only set)
+    tool_results = [m["content"] for req in agent.provider.requests for m in req["messages"] if m.get("role") == "tool"]
+    assert any("unknown tool" in t for t in tool_results)
+    # the post-approval write went through
+    assert tmp_path.joinpath("a.txt").read_text(encoding="utf-8") == "post"
+    # the plan's bullets became the todo list
+    assert [t["content"] for t in tool_ctx.todos] == ["edit a.txt", "run the tests"]
+
+
+def test_plan_mode_rejection_keeps_readonly(tmp_path):
+    """If the user rejects the plan, the agent stays read-only: writes keep failing."""
+    replies = [
+        {"tool_calls": [("exit_plan_mode", {"plan_markdown": "- do x"})]},
+        {"tool_calls": [("write_file", {"path": "a.txt", "content": "x"})]},
+        {"content": "cannot write"},
+    ]
+    agent, tool_ctx = _make_plan_agent(tmp_path, replies, "Reject - keep exploring")
+    res = agent.run([{"role": "user", "content": "plan it"}])
+    assert res.status == "done"
+    assert agent.plan_mode is True  # still in plan mode
+    assert not tmp_path.joinpath("a.txt").exists()
+    assert tool_ctx.todos == []
+
+
 def test_spawn_agent_no_recursion(tmp_path):
     """The sub-agent's tool set must not contain spawn_agent itself."""
     from coder_agent.tools.spawn import _spawn

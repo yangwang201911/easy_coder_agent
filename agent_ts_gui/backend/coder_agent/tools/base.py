@@ -33,6 +33,7 @@ class ToolContext:
     ask_user: Optional[Callable[[dict], Optional[dict]]] = None  # blocks until the user answers; None when headless
     shell: Any = None  # ShellManager for the persistent shell tools (lazy)
     engine: Any = None  # the owning Engine (spawn_agent uses it to build sub-agents)
+    agent: Any = None  # the running Agent (exit_plan_mode uses it to swap the tool set)
     todos: list[dict] = field(default_factory=list)  # the model's task checklist (update_todo)
     turn_cache: dict = field(default_factory=dict)  # per-turn cache: (tool, args, mtime) -> ToolOutput
     read_mtimes: dict = field(default_factory=dict)  # path -> st_mtime_ns of the last read_file (stale-write detection)
