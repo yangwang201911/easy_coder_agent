@@ -244,11 +244,12 @@ def test_extract_memory(tmp_path):
     saved = knowledge.extract_memory(FakeProvider('["use ./run_tests.sh backend to test", "always run lint"]'),
                                      tmp_path, "do stuff", "done")
     assert saved == ["use ./run_tests.sh backend to test", "always run lint"]
-    mem = (tmp_path / ".agent" / "memory.md").read_text(encoding="utf-8")
+    memdir = tmp_path / ".agent" / "memory"
+    mem = "".join(f.read_text(encoding="utf-8") for f in memdir.glob("*.md"))
     assert "run_tests.sh" in mem
-    # dedupe: same note again is not appended twice
+    # dedupe: same note again is not duplicated
     knowledge.extract_memory(FakeProvider('["use ./run_tests.sh backend to test"]'), tmp_path, "x", "y")
-    assert mem == (tmp_path / ".agent" / "memory.md").read_text(encoding="utf-8")
+    assert mem == "".join(f.read_text(encoding="utf-8") for f in memdir.glob("*.md"))
     # nothing to remember / broken reply -> no save, no raise
     assert knowledge.extract_memory(FakeProvider("[]"), tmp_path, "x", "y") == []
     assert knowledge.extract_memory(FakeProvider("not json at all"), tmp_path, "x", "y") == []

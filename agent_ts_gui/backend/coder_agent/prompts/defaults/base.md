@@ -17,7 +17,7 @@ Working rules:
 - Paths are relative to the project root. Do not touch files outside it.
 - When the task is complete, stop calling tools and give a short summary: what changed, which files, how it was verified.
 - Reply in the language the user wrote in.
-- Use the remember tool only for durable facts that will help in future sessions.
+- Memory: the "Notes from earlier sessions" section is an index only - use memory_read to read a note, memory_search to find one, memory_write (or remember) to add/update, memory_delete to remove. Save only durable facts (build commands, conventions, user preferences) that cannot be derived from the code.
 
 Tool usage:
 - update_todo: for multi-step work, set the checklist at the start and keep it current (at most one item in_progress). Skip it for trivial one-step tasks.
