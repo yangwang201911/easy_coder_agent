@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import difflib
 import fnmatch
 import os
@@ -34,23 +35,105 @@ def _read_text(path: Path) -> str:
     data = path.read_bytes()
     if b"\x00" in data[:4096]:
         raise ToolError("binary file")
-    return data.decode("utf-8", errors="replace")
+    return _decode(data)
+
+
+def _decode(data: bytes) -> str:
+    """Try UTF-8 first, then GB18030 (only when CJK lead bytes are present - it
+    decodes almost anything and would mangle latin-1), then latin-1 (always works)."""
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    if any(0x81 <= b <= 0xFE for b in data):
+        try:
+            return data.decode("gb18030")
+        except UnicodeDecodeError:
+            pass
+    return data.decode("latin-1")
+
+
+def _encoding_name(data: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            data.decode(enc)
+            return "utf-8"
+        except UnicodeDecodeError:
+            continue
+    if any(0x81 <= b <= 0xFE for b in data):
+        try:
+            data.decode("gb18030")
+            return "gb18030"
+        except UnicodeDecodeError:
+            pass
+    return "latin-1"
 
 
 # ---------------------------------------------------------------- read_file
+STREAM_READ_BYTES = 1_000_000  # larger files are read line by line, not loaded whole
+
+
+def _iter_lines(path: Path):
+    """Yield lines without loading the whole file (large-file path)."""
+    enc = _encoding_name(path.read_bytes()[:65536])
+    dec = codecs.getincrementaldecoder(enc)()
+    buf = ""
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 16):
+            buf += dec.decode(chunk)
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                yield line
+    tail = dec.decode(b"", True)
+    if buf:
+        yield buf + tail
+    elif tail:
+        yield tail
+
+
+def _count_lines(path: Path) -> int:
+    n = 0
+    last = b""
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            n += chunk.count(b"\n")
+            last = chunk[-1:]
+    if last and last != b"\n":
+        n += 1  # final line without a trailing newline
+    return n
+
+
 def read_file(ctx: ToolContext, a: dict) -> str:
     path = ctx.resolve_readable(a["path"])
-    lines = _read_text(path).splitlines()
-    total = len(lines)
+    if not path.is_file():
+        raise ToolError(f"file not found: {path.name}")
     start = max(1, a.get("start_line", 1))
-    end = a.get("end_line") or min(total, start + MAX_READ_LINES - 1)
-    end = min(end, total, start + MAX_READ_LINES - 1)
+    small = path.stat().st_size <= STREAM_READ_BYTES
+    total = len(_read_text(path).splitlines()) if small else _count_lines(path)
     if start > total and total:
         raise ToolError(f"start_line {start} is past the end of file ({total} lines)")
-    body = "\n".join(f"{i:>5} | {lines[i - 1]}" for i in range(start, end + 1))
+    end = a.get("end_line") or min(total, start + MAX_READ_LINES - 1)
+    end = min(end, total, start + MAX_READ_LINES - 1)
+    lines = []
+    if small:
+        all_lines = _read_text(path).splitlines()
+        lines = all_lines[start - 1:end]
+    else:  # stream: only the requested range is decoded
+        for i, line in enumerate(_iter_lines(path), 1):
+            if i > end:
+                break
+            if i >= start:
+                lines.append(line)
+    body = "\n".join(f"{i:>5} | {l}" for i, l in enumerate(lines, start))
     head = f"{ctx.rel(path)} (lines {start}-{end} of {total})"
+    enc = _encoding_name(path.read_bytes()[:65536])
+    if enc != "utf-8":
+        head += f" [decoded as {enc}]"
     if end < total:
         head += f" - more available, call again with start_line={end + 1}"
+    # remember when we last saw this file: a later write to a newer mtime is stale
+    ctx.read_mtimes[str(path)] = path.stat().st_mtime_ns
     return head + "\n" + body
 
 
@@ -185,16 +268,36 @@ def _current(path: Path) -> str:
     return path.read_bytes().decode("utf-8", errors="replace") if path.is_file() else ""
 
 
+def _check_stale(ctx: ToolContext, path: Path) -> None:
+    """Refuse to write a file that changed on disk after the model last read it."""
+    seen = ctx.read_mtimes.get(str(path))
+    if seen is not None and path.is_file():
+        cur = path.stat().st_mtime_ns
+        if cur > seen:
+            raise ToolError(
+                f"file changed on disk since your last read_file (external modification). "
+                f"Read it again with read_file and re-do the edit."
+            )
+
+
 def write_file(ctx: ToolContext, a: dict) -> str:
     path = ctx.resolve(a["path"])
     if path.is_dir():
         raise ToolError("path is a directory")
+    existed = path.is_file()
+    read_before = str(path) in ctx.read_mtimes  # the model saw the current content
+    _check_stale(ctx, path)
     if ctx.snapshots:
         ctx.snapshots.record(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     content = a["content"]
     path.write_text(content, encoding="utf-8", newline="")
-    return f"Wrote {len(content.splitlines())} lines to {ctx.rel(path)}"
+    ctx.read_mtimes[str(path)] = path.stat().st_mtime_ns
+    msg = f"Wrote {len(content.splitlines())} lines to {ctx.rel(path)}"
+    if existed and not read_before:
+        msg += ("\n[warning] you overwrote an existing file without reading it first - "
+                "read_file it before overwriting next time")
+    return msg
 
 
 def write_file_preview(ctx: ToolContext, a: dict) -> str:
@@ -232,14 +335,37 @@ def _replace(text: str, search: str, replace: str, replace_all: bool) -> tuple[s
         return "\n".join(lines), len(hits)
     if len(hits) > 1:
         raise ToolError(f"'search' matches {len(hits)} places; add more surrounding context")
+    hint = _similar_hint(text, search)
     raise ToolError(
         "'search' text not found. It must match the file exactly (do not include the line-number "
         "prefix shown by read_file). Re-read the file and try again."
+        + (f"\n{hint}" if hint else "")
     )
+
+
+def _similar_hint(text: str, search: str) -> str:
+    """Point the model at the closest lines in the file so it can fix the search text."""
+    t_lines = text.split("\n")
+    s_lines = search.split("\n")
+    if not t_lines or not s_lines:
+        return ""
+    best_i, best_ratio = 0, 0.0
+    first = s_lines[0]
+    for i, line in enumerate(t_lines):
+        ratio = difflib.SequenceMatcher(None, first, line).ratio()
+        if ratio > best_ratio:
+            best_i, best_ratio = i, ratio
+    if best_ratio < 0.6:
+        return ""
+    lo, hi = max(0, best_i - 2), min(len(t_lines), best_i + len(s_lines) + 2)
+    snippet = "\n".join(f"{i + 1:>5} | {l}" for i, l in enumerate(t_lines[lo:hi], lo))
+    return (f"Closest lines (around line {best_i + 1}, similarity {best_ratio:.0%}) - "
+            "compare them with your search text:\n" + snippet)
 
 
 def _patched(ctx: ToolContext, a: dict) -> tuple[Path, str, str, bool]:
     path = ctx.resolve(a["path"])
+    _check_stale(ctx, path)
     raw = _read_text(path)
     crlf = "\r\n" in raw
     old = _norm(raw)
@@ -252,6 +378,7 @@ def apply_patch(ctx: ToolContext, a: dict) -> str:
     if ctx.snapshots:
         ctx.snapshots.record(path)
     path.write_text(new.replace("\n", "\r\n") if crlf else new, encoding="utf-8", newline="")
+    ctx.read_mtimes[str(path)] = path.stat().st_mtime_ns
     return f"Patched {ctx.rel(path)}\n" + _unified(old, new, ctx.rel(path))
 
 
