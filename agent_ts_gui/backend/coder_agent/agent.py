@@ -124,6 +124,9 @@ class Agent:
         self._emit("status", state="waiting_model", detail="compressing context")
         new, info = self.ctx_mgr.compress(messages, self._tools, self._summarize)
         messages[:] = new
+        # the read cache is now stale: the cached content was summarised away,
+        # so a repeat read must return the full content again, not the stub
+        self.tool_ctx.turn_cache.clear()
         if on_compact:
             on_compact(list(new))
         self._emit("context_compressed", before=info.before, after=info.after, algorithm=info.algorithm)
