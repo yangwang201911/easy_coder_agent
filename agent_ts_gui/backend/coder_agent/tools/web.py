@@ -140,19 +140,43 @@ def _duckduckgo(query: str, n: int) -> list[dict]:
     return rows
 
 
+def _domain_match(host: str, pattern: str) -> bool:
+    """host == pattern or host ends with .pattern (subdomains included)."""
+    return host == pattern or host.endswith("." + pattern)
+
+
+def _filter_domains(rows: list[dict], allowed: list[str], blocked: list[str]) -> list[dict]:
+    """Filter search results by domain. Patterns are exact hosts or suffixes
+    (``docs.python.org`` matches ``docs.python.org`` and ``x.docs.python.org``)."""
+    out = []
+    for r in rows:
+        host = (urllib.parse.urlparse(r.get("url", "")).hostname or "").lower()
+        if blocked and any(_domain_match(host, p) for p in blocked):
+            continue
+        if allowed and not any(_domain_match(host, p) for p in allowed):
+            continue
+        out.append(r)
+    return out
+
+
 def web_search(ctx: ToolContext, a: dict) -> str:
     query = str(a["query"]).strip()
     if not query:
         raise ToolError("query is empty")
     n = max(1, min(int(a.get("max_results", 5)), 10))
+    allowed = [str(p).strip().lower() for p in (a.get("allowed_domains") or []) if str(p).strip()]
+    blocked = [str(p).strip().lower() for p in (a.get("blocked_domains") or []) if str(p).strip()]
+    # domain filters can drop rows: fetch extra results when filtering
+    fetch_n = n if not (allowed or blocked) else min(10, max(n * 3, 10))
     if os.environ.get("SEARXNG_URL"):
-        rows = _searxng(os.environ["SEARXNG_URL"], query, n)
+        rows = _searxng(os.environ["SEARXNG_URL"], query, fetch_n)
     elif os.environ.get("BRAVE_API_KEY"):
-        rows = _brave(os.environ["BRAVE_API_KEY"], query, n)
+        rows = _brave(os.environ["BRAVE_API_KEY"], query, fetch_n)
     else:
-        rows = _duckduckgo(query, n)  # keyless fallback
+        rows = _duckduckgo(query, fetch_n)  # keyless fallback
+    rows = _filter_domains(rows, allowed, blocked)[:n]
     if not rows:
-        return f"no results for '{query}'"
+        return f"no results for '{query}'" + (f" (domain filter: allowed={allowed} blocked={blocked})" if allowed or blocked else "")
     body = "\n\n".join(
         f"{i}. {r['title']}\n   {r['url']}" + (f"\n   {r['snippet']}" if r["snippet"] else "")
         for i, r in enumerate(rows, 1)
@@ -271,6 +295,10 @@ def web_tools() -> list[Tool]:
                 "properties": {
                     "query": {"type": "string", "description": "the search query"},
                     "max_results": {"type": "integer", "description": "1-10, default 5"},
+                    "allowed_domains": {"type": "array", "items": {"type": "string"},
+                                        "description": "only keep results from these hosts (suffix match: 'docs.python.org' also matches subdomains)"},
+                    "blocked_domains": {"type": "array", "items": {"type": "string"},
+                                         "description": "drop results from these hosts (suffix match)"},
                 },
                 "required": ["query"],
             },

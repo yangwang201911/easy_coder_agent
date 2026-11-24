@@ -15,6 +15,7 @@ import queue
 import re
 import shutil
 import threading
+import time
 import urllib.parse
 from typing import Callable, Optional
 
@@ -322,6 +323,42 @@ def browser_take_screenshot(ctx: ToolContext, a: dict) -> ToolOutput:
     )
 
 
+WAIT_TIMEOUT_MS = 15000
+
+
+def browser_wait_for(ctx: ToolContext, a: dict) -> str:
+    """Wait until text appears / a ref's element appears / the network goes idle."""
+    text = str(a.get("text") or "").strip()
+    ref = str(a.get("ref") or "").strip()
+    state = str(a.get("state") or "load").strip()
+    if not text and not ref and state in ("", "load"):
+        raise ToolError("give at least one of: text, ref, or state ('load'|'networkidle')")
+
+    def run():
+        page = _BROWSER.page_or_raise()
+        deadline = time.monotonic() + WAIT_TIMEOUT_MS / 1000
+        while True:
+            if text:
+                try:
+                    page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=500)
+                    return f"visible: {text!r}"
+                except Exception:  # noqa: BLE001 - not there yet
+                    pass
+            elif ref:
+                el = page.locator(f"[data-agent-ref='{ref}']").first
+                if el.count() and el.is_visible():
+                    return f"element {ref} is visible"
+            else:
+                page.wait_for_load_state(state, timeout=WAIT_TIMEOUT_MS)
+                return f"page state: {state}"
+            if time.monotonic() >= deadline:
+                what = text and f"text {text!r}" or (ref and f"element {ref}" or f"state {state}")
+                raise ToolError(f"timed out after {WAIT_TIMEOUT_MS // 1000}s waiting for {what}")
+            time.sleep(0.3)
+
+    return _BROWSER.call(run)
+
+
 def browser_console_messages(ctx: ToolContext, a: dict) -> str:
     msgs = _BROWSER.call(_BROWSER.console_messages)
     return "\n".join(msgs[-50:]) or "(no console messages)"
@@ -431,6 +468,23 @@ def browser_tools() -> list[Tool]:
                 "properties": {"full_page": {"type": "boolean", "description": "capture the whole scrollable page"}},
             },
             func=browser_take_screenshot,
+            kind="read",
+        ),
+        Tool(
+            name="browser_wait_for",
+            description=(
+                "Wait until the page is ready before acting: text appears, a snapshot element (ref) "
+                "becomes visible, or the network goes idle. Use after clicks that trigger loading."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "wait until this text is visible on the page"},
+                    "ref": {"type": "string", "description": "wait until this element ref (from browser_snapshot) is visible"},
+                    "state": {"type": "string", "description": "'load' (default) or 'networkidle' - wait for the page state"},
+                },
+            },
+            func=browser_wait_for,
             kind="read",
         ),
         Tool(
