@@ -51,7 +51,7 @@
 | 5.2 | 系统提示词 | 弱 | 无新工具指引、无 git/安全/注入/并行规则 | P0 | ✅ 分节 base.md + 安全/注入/git 条款（🟡 环境块仍分钟级时间戳） |
 | 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 | ✅ 阈值 0.80+输出预留、结构化摘要、回注、`/compact` 手动压缩（🟡 固定单元窗口） |
 | 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 | ✅ `shell_exec/shell_output/shell_kill` + 后台任务 |
-| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件+`move_path/delete_path/make_dir`(入快照)已做；缺 `edit_file`/诊断 |
+| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | ✅ 相似提示+过期检测+编码/大文件+`move_path/delete_path/make_dir`(入快照)+`edit_file` 原子多处编辑（🟡 缺诊断反馈） |
 | 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 | ✅ 结构化 typed notes、索引注入、read/write/delete/search、迁移 |
 | 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ✅ `spawn_agent`（explore 只读 / general 受限步数，防递归，取消传播）（🟡 无 worktree 隔离） |
 | 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 | ✅ `git_*` 工具集（含审批与参数检查） |
@@ -503,6 +503,7 @@ gantt
 | 2026-11-24 | `ff2d10c` | 5.15 权限模式：`ApprovalPolicy.mode`（default/accept_edits/plan/bypass）+ `set_mode`/`get_mode` RPC + GUI 模式菜单 |
 | 2026-11-24 | `ade1502` | 5.7 `spawn_agent`：explore（只读工具）/ general（全工具+步数上限）子 Agent，独立上下文，防递归，4 个回归测试 |
 | 2026-11-24 | `aa20510` | 5.6 计划模式：`/plan` 只读探索 → `exit_plan_mode` 用户审批（计划→todo）→ 中途切换全工具集，2 个回归测试 |
+| 2026-11-24 | `4d48fd6` | 5.11 `edit_file` 原子多处编辑：全部匹配才写盘，任一失败零改动，6 个回归测试 |
 
 ---
 
