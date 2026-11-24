@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from coder_agent.session.snapshots import SnapshotStore
 from coder_agent.tools import fs
 from coder_agent.tools.base import ToolContext, ToolError
 
@@ -12,6 +13,13 @@ from coder_agent.tools.base import ToolContext, ToolError
 @pytest.fixture
 def ctx(tmp_path):
     return ToolContext(root=tmp_path)
+
+
+@pytest.fixture
+def snap_ctx(tmp_path):
+    ctx = ToolContext(root=tmp_path)
+    ctx.snapshots = SnapshotStore(tmp_path, tmp_path / "snaps")
+    return ctx
 
 
 # --------------------------------------------------------------- encoding
@@ -243,6 +251,50 @@ def test_code_symbols_cache_invalidated_on_edit(ctx, tmp_path):
     _os.utime(tmp_path / "a.py", (t, t))
     assert "two" in symbols.code_symbols(ctx, {"query": "two"})
     assert symbols.code_symbols(ctx, {"query": "one"}).startswith("(no symbols")
+
+
+# ------------------------------------------------- move / delete / make_dir
+def test_make_dir(ctx, tmp_path):
+    assert "Created" in fs.make_dir(ctx, {"path": "a/b/c"})
+    assert (tmp_path / "a/b/c").is_dir()
+    with pytest.raises(ToolError):
+        fs.make_dir(ctx, {"path": "a/b/c"})  # already exists
+
+
+def test_move_path(ctx, tmp_path):
+    (tmp_path / "src.txt").write_text("x", encoding="utf-8")
+    assert "Moved" in fs.move_path(ctx, {"source": "src.txt", "destination": "sub/dst.txt"})
+    assert (tmp_path / "sub/dst.txt").is_file()
+    assert not (tmp_path / "src.txt").exists()
+    with pytest.raises(ToolError):
+        fs.move_path(ctx, {"source": "missing.txt", "destination": "y.txt"})
+
+
+def test_delete_path(ctx, tmp_path):
+    (tmp_path / "gone.txt").write_text("x", encoding="utf-8")
+    assert "Deleted" in fs.delete_path(ctx, {"path": "gone.txt"})
+    assert not (tmp_path / "gone.txt").exists()
+    with pytest.raises(ToolError):
+        fs.delete_path(ctx, {"path": "a-dir"})  # not a file
+
+
+def test_move_delete_rewind(snap_ctx, tmp_path):
+    """move + delete are recorded in the snapshot and restored by rewind."""
+    snap = snap_ctx.snapshots
+    snap.begin("t1")
+    (tmp_path / "orig.txt").write_text("original", encoding="utf-8")
+    (tmp_path / "temp.txt").write_text("temp", encoding="utf-8")
+    fs.move_path(snap_ctx, {"source": "orig.txt", "destination": "renamed.txt"})
+    fs.delete_path(snap_ctx, {"path": "temp.txt"})
+    assert (tmp_path / "renamed.txt").is_file()
+    assert not (tmp_path / "orig.txt").exists()
+    assert not (tmp_path / "temp.txt").exists()
+    changed = set(snap.changed_files("t1"))
+    assert {"orig.txt", "renamed.txt", "temp.txt"} <= changed
+    snap.restore("t1")
+    assert (tmp_path / "orig.txt").read_text(encoding="utf-8") == "original"
+    assert (tmp_path / "temp.txt").read_text(encoding="utf-8") == "temp"
+    assert not (tmp_path / "renamed.txt").exists()
 
 
 def test_code_symbols_tool_registered():

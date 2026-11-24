@@ -484,6 +484,54 @@ def apply_patch_preview(ctx: ToolContext, a: dict) -> str:
     return _unified(old, new, ctx.rel(path))
 
 
+# ------------------------------------------------- move / delete / make_dir
+def move_path(ctx: ToolContext, a: dict) -> str:
+    src = ctx.resolve(a["source"])
+    dst = ctx.resolve(a["destination"])
+    if not src.exists():
+        raise ToolError(f"source does not exist: {ctx.rel(src)}")
+    if dst.exists():
+        raise ToolError(f"destination already exists: {ctx.rel(dst)} (delete it first or choose another name)")
+    if ctx.snapshots:
+        ctx.snapshots.record(src)      # existed -> restored on rewind
+        ctx.snapshots.record(dst)      # not existed -> removed on rewind
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    ctx.read_mtimes.pop(str(src), None)
+    return f"Moved {ctx.rel(src)} -> {ctx.rel(dst)}"
+
+
+def move_path_preview(ctx: ToolContext, a: dict) -> str:
+    return f"move {ctx.rel(ctx.resolve(a['source']))} -> {ctx.rel(ctx.resolve(a['destination']))}"
+
+
+def delete_path(ctx: ToolContext, a: dict) -> str:
+    path = ctx.resolve(a["path"])
+    if not path.is_file():
+        raise ToolError(f"not a file (or does not exist): {ctx.rel(path)} (use a shell command to remove directories)")
+    if ctx.snapshots:
+        ctx.snapshots.record(path)
+    path.unlink()
+    ctx.read_mtimes.pop(str(path), None)
+    return f"Deleted {ctx.rel(path)}"
+
+
+def delete_path_preview(ctx: ToolContext, a: dict) -> str:
+    return f"delete {ctx.rel(ctx.resolve(a['path']))}"
+
+
+def make_dir(ctx: ToolContext, a: dict) -> str:
+    path = ctx.resolve(a["path"])
+    if path.exists():
+        raise ToolError(f"path already exists: {ctx.rel(path)}")
+    path.mkdir(parents=True, exist_ok=False)
+    return f"Created directory {ctx.rel(path)}"
+
+
+def make_dir_preview(ctx: ToolContext, a: dict) -> str:
+    return f"mkdir {ctx.rel(ctx.resolve(a['path']))}"
+
+
 def fs_tools() -> list[Tool]:
     P = "path relative to the project root (absolute paths are accepted only inside trusted dirs such as /tmp)"
     return [
@@ -586,5 +634,46 @@ def fs_tools() -> list[Tool]:
             apply_patch,
             kind="write",
             preview=apply_patch_preview,
+        ),
+        Tool(
+            "move_path",
+            "Move or rename a file (or directory). The destination must not already exist. "
+            "These operations are recorded in the turn snapshot, so rewind can undo them.",
+            {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": P},
+                    "destination": {"type": "string", "description": P},
+                },
+                "required": ["source", "destination"],
+            },
+            move_path,
+            kind="write",
+            preview=move_path_preview,
+        ),
+        Tool(
+            "delete_path",
+            "Delete a file. Directories are not supported (use a shell command). Recorded in the "
+            "turn snapshot, so rewind can restore the file.",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": P}},
+                "required": ["path"],
+            },
+            delete_path,
+            kind="write",
+            preview=delete_path_preview,
+        ),
+        Tool(
+            "make_dir",
+            "Create a directory (including parents).",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": P}},
+                "required": ["path"],
+            },
+            make_dir,
+            kind="write",
+            preview=make_dir_preview,
         ),
     ]

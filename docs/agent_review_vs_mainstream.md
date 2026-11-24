@@ -51,7 +51,7 @@
 | 5.2 | 系统提示词 | 弱 | 无新工具指引、无 git/安全/注入/并行规则 | P0 | ✅ 分节 base.md + 安全/注入/git 条款（🟡 环境块仍分钟级时间戳） |
 | 5.3 | 压缩 | 弱 | 95% 才压缩，摘要无结构，不回注 todo/最近文件 | P0 | ✅ 阈值 0.80+输出预留、结构化摘要、回注（🟡 无 `/compact`、固定单元窗口） |
 | 5.8 | 持久 shell | 缺失 | `run_command` 无状态，无后台任务 | P1 | ✅ `shell_exec/shell_output/shell_kill` + 后台任务 |
-| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件已做；缺 `edit_file`/move/delete/mkdir/诊断 |
+| 5.11 | 编辑工具 | 中 | 无相似文本提示、无过期检测、无多处编辑、无诊断反馈 | P1 | 🟡 相似提示+过期检测+编码/大文件+`move_path/delete_path/make_dir`(入快照)已做；缺 `edit_file`/诊断 |
 | 5.4 | memory | 弱 | 无类型/索引/检索/编辑删除 | P1 | ✅ 结构化 typed notes、索引注入、read/write/delete/search、迁移 |
 | 5.7 | 子 Agent | 缺失 | 只有计划模式内部使用，模型不可调用 | P1 | ❌ 无 `spawn_agent` |
 | 5.9 | git | 缺失 | 全靠 `run_command`，无安全规则 | P1 | ✅ `git_*` 工具集（含审批与参数检查） |
@@ -496,7 +496,8 @@ gantt
 | 2026-11-24 | `a950e4b` | 5.17 测试整理：脚本化 LLM 回放、统一入口、base_url 探测 |
 | 2026-11-24 | `07c79b5` | 5.10 grep 增强（type/glob/offset/head_limit/multiline/context）+ `code_symbols` |
 | 2026-11-24 | `770b17f` | 5.4 memory：结构化 typed notes、索引注入、`memory_write/read/delete/search`、旧格式迁移 |
-| 2026-11-24 | — | 5.5 skills：`use_skill` 工具 + 斜杠 `/skill` 调用 + front-matter `tools/effort`（进行中） |
+| 2026-11-24 | `d8182b9` | 5.5 skills：`use_skill` 工具 + 斜杠 `/skill` 调用 + front-matter `tools/effort` + 5 个内置 skill |
+| 2026-11-24 | — | 5.11 `move_path/delete_path/make_dir`（kind=write，进入快照，rewind 可撤销） |
 
 ---
 
