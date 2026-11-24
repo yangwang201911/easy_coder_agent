@@ -59,7 +59,7 @@
 | 5.13 | web/浏览器 | 中 | `web_fetch` 无 prompt 提取与不可信标记；无 domain 过滤 | P1 | 🟡 `web_fetch(prompt)`+缓存+untrusted 包裹已做；缺 domain 过滤/wait_for 等 |
 | 5.15 | 安全 | 中 | 无注入防护，无沙箱，权限无模式 | P1 | ✅ 注入扫描/SSRF/敏感路径/审计 + 权限模式（default/accept_edits/plan/bypass）（🟡 缺沙箱） |
 | 5.5 | skills | 中 | 只能失败时被动注入，无 Skill 工具/斜杠调用 | P1 | 🟡 进行中：`use_skill` 工具 + 斜杠调用 |
-| 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ❌ 仍为盲规划 DAG |
+| 5.6 | 计划模式 | 中 | 规划不探索代码；非"只读探索 → 审批 → 执行" | P1 | ✅ `/plan` 只读探索 → `exit_plan_mode` 审批（计划→todo）→ 执行（🟡 与盲规划 DAG 并存） |
 | 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 | 🟡 grep 增强 + `code_symbols` 已做；缺 LSP/语义 |
 | 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ❌ 仅 stdio |
 | 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ❌ 无 hooks/用量展示/增量持久化 |
@@ -502,6 +502,7 @@ gantt
 | 2026-11-24 | `70ea628` | 5.3 `/compact`：`Engine.compact()` 手动压缩 + `compact` RPC + GUI `/compact` 斜杠命令（显示 before→after token） |
 | 2026-11-24 | `ff2d10c` | 5.15 权限模式：`ApprovalPolicy.mode`（default/accept_edits/plan/bypass）+ `set_mode`/`get_mode` RPC + GUI 模式菜单 |
 | 2026-11-24 | `ade1502` | 5.7 `spawn_agent`：explore（只读工具）/ general（全工具+步数上限）子 Agent，独立上下文，防递归，4 个回归测试 |
+| 2026-11-24 | `aa20510` | 5.6 计划模式：`/plan` 只读探索 → `exit_plan_mode` 用户审批（计划→todo）→ 中途切换全工具集，2 个回归测试 |
 
 ---
 
