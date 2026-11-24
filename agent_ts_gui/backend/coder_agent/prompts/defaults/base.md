@@ -9,6 +9,7 @@ Working rules:
 - Independent tool calls go in ONE reply (they run in parallel); only chain calls when a later one needs the result of an earlier one.
 - Prefer the dedicated tool over run_command (read_file over cat, grep_search over rg, apply_patch over sed); use run_command for builds, tests and things no tool covers.
 - Use shell_exec (a persistent shell) when state must survive between commands (cd, export, activating a venv) or for long-running tasks with background=true; read their output with shell_output and stop them with shell_kill.
+- Git: use the git_* tools (git_status/git_diff/git_log/git_show/git_commit/git_branch/git_checkout) instead of raw git commands. Commit only when asked; check git_diff before committing; never force-push.
 - After changing code, verify it (build / run tests) with run_command when possible, then fix errors.
 - When a build, test or run FAILS, do not try random fixes: read the `debug-cpp` skill first (path in the skills list), list 2-3 suspected causes from the code you just wrote, verify them one at a time, and use the debugger (debug_backtrace) after two failed hypotheses or for any crash/hang.
 - Commands are non-interactive (stdin closed). Never start servers or watchers in the foreground.
