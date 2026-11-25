@@ -3,12 +3,42 @@
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 # ==================== 用户配置区 ====================
+# 默认值（可被 .gguf_selected 覆盖，由 download 子命令生成）
 # MODEL_PATH="${SCRIPT_DIR}/../../unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf"
 MODEL_PATH="${SCRIPT_DIR}/../../unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf"
 SERVED_MODEL_NAME="qwen3.8-27b"
 
 # 上下文长度（改这个值会触发重新导入）
 NUM_CTX="131072"
+
+# 视觉（VL）开关：留空=download 时交互询问；1=启用(需 mmproj)；0=纯文本
+WANT_VL="${WANT_VL:-}"
+MMPROJ_FILE="${SCRIPT_DIR}/vl/mmproj-Qwen3.8-27B-F16.gguf"
+
+# GGUF 下载源（HuggingFace）
+GGUF_REPO="unsloth/Qwen3.8-27B-GGUF"
+GGUF_BASENAME="Qwen3.8-27B-UD"
+GGUF_DIR="${SCRIPT_DIR}/../../unsloth/Qwen3.8-27B-GGUF"
+HF_ENDPOINT="${HF_ENDPOINT:-}"
+
+# 若 download 子命令已生成选择配置，覆盖上面的默认
+GGUF_CONFIG="${SCRIPT_DIR}/.gguf_selected"
+[ -f "$GGUF_CONFIG" ] && source "$GGUF_CONFIG"
+
+# 可选量化清单（针对 16GB 显存，如 5070 Ti）：量化|大小(约)|推荐num_ctx|说明
+QUANT_LIST=(
+  "Q8_0|27.5GB|8192|精度最高；16GB 需大量 CPU 卸载，很慢"
+  "Q6_K|22.5GB|8192|16GB 需 CPU 卸载，慢"
+  "Q5_K_M|19.5GB|8192|16GB 需 CPU 卸载，慢"
+  "Q4_K_M|16.8GB|8192|16GB 偏紧，仅 8K 上下文"
+  "Q4_K_S|15.8GB|8192|16GB 偏紧，仅 8K 上下文"
+  "Q3_K_M|13.8GB|16384|16GB 可用，16K 上下文"
+  "Q3_K_S|12.3GB|24576|16GB 可用，24K 上下文"
+  "IQ3_XS|13.2GB|16384|★16GB 推荐，16K 上下文"
+  "IQ3_XXS|12.6GB|24576|★16GB 推荐，24K 上下文"
+  "IQ2_XXS|10.8GB|32768|16GB 宽松，32K 上下文"
+  "Q2_K|10.2GB|32768|16GB 宽松，32K 上下文；精度损失较大"
+)
 
 # 思考模式开关 (true: 开启思考, false: 关闭思考)
 ENABLE_THINKING="false"
@@ -163,9 +193,9 @@ compute_model_fingerprint() {
     tail_start=$(( size > 1048576 ? size - 1048576 : 0 ))
     tail_sha=$(tail -c +$((tail_start + 1)) "$f" 2>/dev/null | sha256sum | awk '{print $1}')
 
-    printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
         "$size" "$mtime" "$ino" "$head_sha" "$tail_sha" \
-        "$SERVED_MODEL_NAME" "$NUM_CTX"
+        "$SERVED_MODEL_NAME" "$NUM_CTX" "$WANT_VL"
 }
 
 # 判断缓存是否仍然有效
@@ -194,10 +224,13 @@ check_and_import_model() {
     fi
 
     echo "[+] 正在针对当前 GGUF 文件生成 Modelfile (num_ctx ${NUM_CTX}) 并导入..."
-    cat << EOF > "$MODELFILE_PATH"
-FROM ${MODEL_PATH}
-PARAMETER num_ctx ${NUM_CTX}
-EOF
+    {
+      echo "FROM ${MODEL_PATH}"
+      echo "PARAMETER num_ctx ${NUM_CTX}"
+      if [ "$WANT_VL" = "1" ] && [ -f "$MMPROJ_FILE" ]; then
+        echo "PARAMETER mmproj ${MMPROJ_FILE}"
+      fi
+    } > "$MODELFILE_PATH"
 
     ollama create "$SERVED_MODEL_NAME" -f "$MODELFILE_PATH"
     if [ $? -eq 0 ]; then
@@ -325,8 +358,71 @@ case "$1" in
         tail -f "$LOG_FILE"
         ;;
 
+    download)
+        echo "可选量化（针对 16GB 显存，如 5070 Ti）:"
+        echo "  编号  量化        大小(约)   推荐num_ctx   说明"
+        for i in "${!QUANT_LIST[@]}"; do
+          IFS='|' read -r q size ctx note <<< "${QUANT_LIST[$i]}"
+          printf "  %-4s %-10s %-10s %-13s %s\n" "$((i+1))" "$q" "$size" "$ctx" "$note"
+        done
+        read -r -p "选择量化编号 [默认 9=IQ3_XXS]: " pick
+        pick="${pick:-9}"
+        if ! [[ "$pick" =~ ^[0-9]+$ ]] || [ "$pick" -lt 1 ] || [ "$pick" -gt "${#QUANT_LIST[@]}" ]; then
+          echo "[!] 无效编号: $pick"
+          exit 1
+        fi
+        IFS='|' read -r QUANT QUANT_SIZE QUANT_CTX QUANT_NOTE <<< "${QUANT_LIST[$((pick-1))]}"
+        echo "[+] 已选: $QUANT (大小约 $QUANT_SIZE, num_ctx=$QUANT_CTX)"
+
+        # 视觉开关（未预设则询问）
+        if [ -z "$WANT_VL" ]; then
+          read -r -p "启用视觉（VL）？[Y/n] " vans
+          case "$vans" in [nN]*) WANT_VL=0 ;; *) WANT_VL=1 ;; esac
+        fi
+
+        # 镜像源（未预设则询问）
+        if [ -z "$HF_ENDPOINT" ]; then
+          read -r -p "网络较慢？用国内镜像 hf-mirror.com 下载？[y/N] " ans
+          case "$ans" in [yY]*) HF_ENDPOINT="https://hf-mirror.com" ;; *) HF_ENDPOINT="https://huggingface.co" ;; esac
+        fi
+
+        # 下载 mmproj（若启用视觉且本地没有）
+        if [ "$WANT_VL" = "1" ] && [ ! -f "$MMPROJ_FILE" ]; then
+          echo "[+] 下载 mmproj -> $MMPROJ_FILE"
+          mkdir -p "$(dirname "$MMPROJ_FILE")"
+          curl -fL --noproxy '*' -o "$MMPROJ_FILE" "$HF_ENDPOINT/$GGUF_REPO/resolve/main/mmproj-F16.gguf" || { echo "[!] mmproj 下载失败"; exit 1; }
+        fi
+
+        # 下载 GGUF
+        mkdir -p "$GGUF_DIR"
+        MODEL_PATH="$GGUF_DIR/${GGUF_BASENAME}-${QUANT}.gguf"
+        URL="$HF_ENDPOINT/$GGUF_REPO/resolve/main/${GGUF_BASENAME}-${QUANT}.gguf"
+        if [ -f "$MODEL_PATH" ]; then
+          echo "    已存在，跳过下载: $MODEL_PATH"
+        else
+          echo "    从 URL 下载: $URL"
+          curl -fL --noproxy '*' -o "$MODEL_PATH" "$URL" || { echo "[!] GGUF 下载失败: $URL"; exit 1; }
+        fi
+
+        # 写选择配置（供 start 使用）
+        NUM_CTX="$QUANT_CTX"
+        cat > "$GGUF_CONFIG" <<EOF
+MODEL_PATH="$MODEL_PATH"
+NUM_CTX=$NUM_CTX
+WANT_VL=$WANT_VL
+QUANT=$QUANT
+EOF
+        echo "[✓] 配置已写入 $GGUF_CONFIG (量化=$QUANT, num_ctx=$NUM_CTX, VL=$WANT_VL)"
+        echo "    下一步: $0 start"
+        if [ "$WANT_VL" = "1" ]; then
+          echo "    提示: 若 ollama create 报 mmproj 错误，说明当前 Ollama 不支持 PARAMETER mmproj，"
+          echo "          请升级 Ollama（5070 Ti/Blackwell 本就需要新版）或用 manifest 方式挂视觉。"
+        fi
+        ;;
+
     *)
-        echo "使用方法: $0 {start|stop|restart|status|log}"
+        echo "使用方法: $0 {download|start|stop|restart|status|log}"
+        echo "  download  列出量化清单(含 IQ3+大小)并下载，自动定 num_ctx"
         exit 1
         ;;
 esac

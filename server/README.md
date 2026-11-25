@@ -25,7 +25,7 @@ server/
 │   │   └── download_model.sh  #   下载 vLLM 模型
 │   ├── ollama/
 │   │   ├── bootstrap.sh       #   ★ 一键下载基座模型 + 视觉 mmproj + 构建 VL tag
-│   │   ├── manage_gguf.sh     #   GGUF 直载（unsloth/Qwen3.8-27B）
+│   │   ├── manage_gguf.sh     #   GGUF 直载：download 选量化(含IQ3+大小)→自动定 num_ctx
 │   │   ├── manage_mtp.sh      #   自包含模型库 + MTP 投机解码
 │   │   ├── models/            #   自包含 Ollama 模型库（blobs/manifests，脚本下载，不入库）
 │   │   └── vl/                #   VL 视觉变体（make_vl_tag.sh + mmproj，mmproj 不入库）
@@ -54,12 +54,26 @@ cd backends/vllm
 
 ### Ollama（含视觉）
 
+两条路径，按需选择：
+
+**路径 A：registry 模型 + MTP 投机解码（`manage_mtp.sh`）**
 ```bash
 cd backends/ollama
 ./bootstrap.sh         # 首次：一键下载基座模型 + 视觉 mmproj，并构建 :map-k4v-vl
 ./manage_mtp.sh start  # 启动（文本 + 视觉）
 # 视觉模型名: smtek/Swift-Qwen3.8-27B:map-k4v-vl
+# 全部可配置项: ./manage_mtp.sh help
 ```
+
+**路径 B：本地 GGUF 直载 + 自选量化（`manage_gguf.sh`，适合 16GB 显存如 5070 Ti）**
+```bash
+cd backends/ollama
+./manage_gguf.sh download   # 列出量化清单(含 IQ3+权重大小)→选编号→自动定 num_ctx→下载
+./manage_gguf.sh start      # 启动（文本 + 视觉，按 download 时的选择）
+```
+- 量化清单含 Q8_0…Q2_K，**16GB 推荐 IQ3_XS / IQ3_XXS**（num_ctx 自动设为 16K/24K）。
+- 选择结果写入 `.gguf_selected`，`start` 自动读取；换量化重跑 `download` 即可。
+- ⚠️ 5070 Ti 是 Blackwell (sm_120)，需**新版 Ollama**；若 `ollama create` 报 mmproj 错误，升级 Ollama 即可。
 
 ### OVMS
 

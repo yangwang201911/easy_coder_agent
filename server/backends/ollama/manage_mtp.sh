@@ -288,8 +288,44 @@ case "$1" in
         tail -f "$LOG_FILE"
         ;;
 
+    help)
+        cat <<'EOF'
+manage_mtp.sh - 自包含模型库 + MTP 投机解码 的 Ollama 服务管理器
+
+用法:
+  $0 {start|stop|restart|status|log|help} [gpu_id]
+
+子命令:
+  start [gpu_id]    启动服务（默认 gpu_id=0；多卡可传 "0,1"，编号与 nvidia-smi 一致）
+  stop              停止服务并释放显存
+  restart [gpu_id]  重启服务
+  status            查看运行状态 + 模型是否就绪 + MTP 是否生效
+  log               实时跟踪日志 (ollama_server_mtp.log)
+  help              显示本帮助
+
+可配置项（优先级: 脚本顶部配置区 > 环境变量 > 默认值）:
+  GPU_ID / 第2参数    选择 GPU，默认 0
+  OLLAMA_BIN          补丁版 Ollama 可执行文件（MTP 投机解码需要），默认 ollama
+  ENABLE_THINKING     思考模式 true/false，默认 false
+  NUM_CTX             上下文长度，默认用模型自带 (143360)
+  OLLAMA_MODELS       模型库目录，默认 <脚本目录>/models
+  OLLAMA_BIND_IP      手动指定绑定 IP（默认自动探测本机出口 IP）
+  OLLAMA_PREFER_IFACE 指定优先网卡（如 eth0），配合 IP 探测
+  OLLAMA_HOST         直接指定 服务地址 IP:端口（默认 <探测IP>:8000）
+  OLLAMA_KEEP_ALIVE   模型常驻时间，默认 -1（常驻显存）
+  OLLAMA_FLASH_ATTENTION / OLLAMA_KV_CACHE_TYPE  推理优化，默认 true / q8_0
+
+示例:
+  $0 start                        # 用 GPU 0 启动
+  $0 start 1                      # 用 GPU 1 启动
+  GPU_ID=2 $0 start               # 用 GPU 2 启动
+  OLLAMA_BIND_IP=1.2.3.4 $0 start # 指定绑定 IP
+EOF
+        ;;
+
     *)
-        echo "使用方法: $0 {start|stop|restart|status|log} [gpu_id]  (默认 gpu_id=0)"
+        echo "使用方法: $0 {start|stop|restart|status|log|help} [gpu_id]  (默认 gpu_id=0)"
+        echo "详细选项说明: $0 help"
         exit 1
         ;;
 esac
