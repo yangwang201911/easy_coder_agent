@@ -37,7 +37,7 @@ from .config import AppConfig, load_config, save_config
 from .context.compression import available_strategies
 from .engine import Engine, _serialised
 from .events import EventBus
-from .llm import LLMProvider, create_provider, fetch_context_info, probe_vision
+from .llm import LLMProvider, create_provider, fetch_context_info, probe_effort, probe_vision
 from .orchestrator import Plan, StageReport
 from .prompts import PromptBuilder, PromptSections
 from .session import Session
@@ -209,6 +209,7 @@ class Server:
             "test_connection": self.test_connection,
             "context_info": self.context_info,
             "context_estimate": self.context_estimate,
+            "mcp_status": self.mcp_status,
             "task_types": self.task_types,
             "system_prompt": self.system_prompt,
             "prompt_dumps": self.prompt_dumps,
@@ -233,6 +234,10 @@ class Server:
             "terminal_resize": self.terminal_resize,
             "terminal_close": self.terminal_close,
             "terminal_list": self.terminal_list,
+            "skill_body": self.skill_body,
+            "compact": self.compact,
+            "set_mode": self.set_mode,
+            "get_mode": self.get_mode,
         }
 
     @property
@@ -349,6 +354,9 @@ class Server:
         self._unsubscribe = self.bus.subscribe(self._on_bus_event)
         self.root = root
         self._last_root = root
+        # connection probe: a cheap HTTP GET (no model call) tells the GUI right
+        # away when the configured base_url does not match the running service
+        probe = fetch_context_info(cfg.server)
         return {
             "root": str(root),
             "session_id": self.engine.session.id,
@@ -356,13 +364,51 @@ class Server:
             "effort": cfg.thinking.effort,
             "config": _jsonable(cfg),
             "session_approve": False,  # a new engine: the session-wide auto-approve is reset
+            "model_probe": probe.describe(),
         }
 
     def submit(self, p: dict) -> dict:
         e = self._require_engine()
         prompt, task_type = p.get("prompt", ""), p.get("task_type")
         images = _validate_images(p.get("images"))
-        return self._start_turn(lambda: e.submit(prompt, task_type, images))
+        effort = p.get("effort")
+        plan = bool(p.get("plan", False))
+        return self._start_turn(lambda: e.submit(prompt, task_type, images, effort, plan=plan))
+
+    def skill_body(self, p: dict) -> dict:
+        """Full body of a skill by name (for the GUI's ``/skill-name`` slash command)."""
+        e = self._require_engine()
+        from .knowledge import skill_by_name
+
+        name = str(p.get("name", ""))
+        s = skill_by_name(e.root, name)
+        if s is None:
+            from .knowledge import load_skills
+
+            return {"error": f"unknown skill '{name}'", "available": sorted(load_skills(e.root))}
+        return {"name": s.name, "description": s.description, "body": s.body}
+
+    def compact(self, p: dict) -> dict:
+        """User-triggered context compaction (the GUI's ``/compact`` command)."""
+        e = self._require_engine()
+        if self._busy:
+            raise RuntimeError("a turn is running - cannot compact now")
+        return e.compact(str(p.get("hint", "")))
+
+    def set_mode(self, p: dict) -> dict:
+        """Set the permission mode: default | accept_edits | plan | bypass."""
+        e = self._require_engine()
+        mode = str(p.get("mode", "default"))
+        if mode not in ("default", "accept_edits", "plan", "bypass"):
+            return {"error": f"invalid mode '{mode}'", "available": ["default", "accept_edits", "plan", "bypass"]}
+        e.policy.mode = mode
+        self.bus.emit("mode_changed", mode=mode)
+        return {"ok": True, "mode": mode}
+
+    def get_mode(self, p: dict) -> dict:
+        """Get the current permission mode."""
+        e = self._require_engine()
+        return {"mode": e.policy.mode}
 
     def list_dir(self, p: dict) -> dict:
         """List a directory on the machine the server runs on.
@@ -491,12 +537,18 @@ class Server:
         e = self._require_engine()
         info = fetch_context_info(e.config.server)
         return {"context": _jsonable(info), "context_text": info.describe(),
-                "configured_max": e.config.context.max_tokens}
+                "configured_max": e.config.context.max_tokens,
+                "efforts": probe_effort(e.config.server)}
 
     def context_estimate(self, p: dict) -> dict:
         e = self._require_engine()
         msgs = e.session.build_messages()
         return {"tokens": e.ctx_mgr.tokens(msgs), "max_tokens": e.config.context.max_tokens}
+
+    def mcp_status(self, p: dict) -> dict:
+        """Per-MCP-server state (connected / tools / error) for the GUI."""
+        e = self._require_engine()
+        return {"servers": e.mcp.status(), "lazy": len(e.mcp._lazy) > 0 and "mcp_search" in e.registry.names()}
 
     def task_types(self, p: dict) -> dict:
         e = self._require_engine()

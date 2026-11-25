@@ -15,6 +15,7 @@ import queue
 import re
 import shutil
 import threading
+import time
 import urllib.parse
 from typing import Callable, Optional
 
@@ -225,7 +226,8 @@ def _snapshot_text(page) -> str:
     refs = page.evaluate(_SNAPSHOT_JS, MAX_ELEMENTS)
     text = page.evaluate("() => document.body ? document.body.innerText : ''")
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()[:MAX_TEXT_CHARS]
-    return f"Page: {title}\nURL: {page.url}\n\n## Interactive elements\n{refs or '(none)'}\n\n## Text\n{text}"
+    from .web import _untrusted
+    return _untrusted(page.url, f"Page: {title}\nURL: {page.url}\n\n## Interactive elements\n{refs or '(none)'}\n\n## Text\n{text}")
 
 
 def browser_navigate(ctx: ToolContext, a: dict) -> str:
@@ -307,10 +309,54 @@ def browser_take_screenshot(ctx: ToolContext, a: dict) -> ToolOutput:
     data, url = _BROWSER.call(run)
     if len(data) > MAX_SCREENSHOT_BYTES:
         raise ToolError("screenshot too large; retry with full_page=false")
+    # full-page shots can be very tall: downscale the long side to keep the
+    # visual token cost bounded (no-op for viewport shots, already <=1280 wide)
+    if full_page:
+        try:
+            from .vision import resize_jpeg
+            data = resize_jpeg(data)
+        except ImportError:
+            pass  # no Pillow: pass through, the size guard above still applies
     return ToolOutput(
         text=f"screenshot of {url} attached below ({len(data) // 1024} KB). Inspect the rendered page.",
         images=[{"name": "screenshot", "data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode()}],
     )
+
+
+WAIT_TIMEOUT_MS = 15000
+
+
+def browser_wait_for(ctx: ToolContext, a: dict) -> str:
+    """Wait until text appears / a ref's element appears / the network goes idle."""
+    text = str(a.get("text") or "").strip()
+    ref = str(a.get("ref") or "").strip()
+    state = str(a.get("state") or "load").strip()
+    if not text and not ref and state in ("", "load"):
+        raise ToolError("give at least one of: text, ref, or state ('load'|'networkidle')")
+
+    def run():
+        page = _BROWSER.page_or_raise()
+        deadline = time.monotonic() + WAIT_TIMEOUT_MS / 1000
+        while True:
+            if text:
+                try:
+                    page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=500)
+                    return f"visible: {text!r}"
+                except Exception:  # noqa: BLE001 - not there yet
+                    pass
+            elif ref:
+                el = page.locator(f"[data-agent-ref='{ref}']").first
+                if el.count() and el.is_visible():
+                    return f"element {ref} is visible"
+            else:
+                page.wait_for_load_state(state, timeout=WAIT_TIMEOUT_MS)
+                return f"page state: {state}"
+            if time.monotonic() >= deadline:
+                what = text and f"text {text!r}" or (ref and f"element {ref}" or f"state {state}")
+                raise ToolError(f"timed out after {WAIT_TIMEOUT_MS // 1000}s waiting for {what}")
+            time.sleep(0.3)
+
+    return _BROWSER.call(run)
 
 
 def browser_console_messages(ctx: ToolContext, a: dict) -> str:
@@ -397,7 +443,7 @@ def browser_tools() -> list[Tool]:
             description="Click an element by ref from the latest browser_snapshot.",
             parameters={"type": "object", "properties": {"ref": ref_param}, "required": ["ref"]},
             func=browser_click,
-            kind="read",
+            kind="action",  # mutates the page: must run serially, in call order
         ),
         Tool(
             name="browser_type",
@@ -412,7 +458,7 @@ def browser_tools() -> list[Tool]:
                 "required": ["ref", "text"],
             },
             func=browser_type,
-            kind="read",
+            kind="action",  # mutates the page: must run serially, in call order
         ),
         Tool(
             name="browser_take_screenshot",
@@ -422,6 +468,23 @@ def browser_tools() -> list[Tool]:
                 "properties": {"full_page": {"type": "boolean", "description": "capture the whole scrollable page"}},
             },
             func=browser_take_screenshot,
+            kind="read",
+        ),
+        Tool(
+            name="browser_wait_for",
+            description=(
+                "Wait until the page is ready before acting: text appears, a snapshot element (ref) "
+                "becomes visible, or the network goes idle. Use after clicks that trigger loading."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "wait until this text is visible on the page"},
+                    "ref": {"type": "string", "description": "wait until this element ref (from browser_snapshot) is visible"},
+                    "state": {"type": "string", "description": "'load' (default) or 'networkidle' - wait for the page state"},
+                },
+            },
+            func=browser_wait_for,
             kind="read",
         ),
         Tool(
@@ -451,14 +514,14 @@ def browser_tools() -> list[Tool]:
                 "required": ["index"],
             },
             func=browser_switch_tab,
-            kind="read",
+            kind="action",  # mutates browser state: must run serially, in call order
         ),
         Tool(
             name="browser_close",
             description="Close the browser (all tabs).",
             parameters={"type": "object", "properties": {}},
             func=browser_close,
-            kind="read",
+            kind="action",
         ),
         Tool(
             name="web_open",

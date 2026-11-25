@@ -28,8 +28,12 @@ class ContextManager:
     def ratio(self, messages: list[dict], tools: Optional[list[dict]] = None) -> float:
         return self.tokens(messages, tools) / max(1, self.cfg.max_tokens)
 
-    def needs_compression(self, messages: list[dict], tools: Optional[list[dict]] = None) -> bool:
-        return self.ratio(messages, tools) >= self.cfg.compress_threshold
+    def needs_compression(self, messages: list[dict], tools: Optional[list[dict]] = None, force: bool = False) -> bool:
+        # reserve room for the model's own reply (long tool output + thinking can
+        # run into thousands of tokens): trigger as soon as the window would fill up
+        if force:
+            return True
+        return self.tokens(messages, tools) + self.cfg.output_reserve_tokens >= self.cfg.max_tokens * self.cfg.compress_threshold
 
     def calibrate(self, messages: list[dict], tools: Optional[list[dict]], actual_prompt_tokens: int) -> None:
         self.counter.calibrate(self.counter.count_raw(messages, tools), actual_prompt_tokens)

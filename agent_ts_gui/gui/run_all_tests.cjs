@@ -15,30 +15,16 @@ const REMOTE_PORT = 8931;
 const IS_WIN = process.platform === "win32";
 const VENV_PY = path.join(BACKEND, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
 
-// name -> script. Order matters only for readability.
-const SUITES = {
-  connection_regression: "connection_regression_test.cjs",
-  ssh_tunnel: "ssh_tunnel_test.cjs",
-  ssh: "cdp_ssh_test.cjs",
-  settings_boot: "cdp_settings_boot_test.cjs",
-  boot: "cdp_boot_test.cjs",
-  proj: "cdp_proj_test.cjs",
-  proj_switch: "cdp_proj_switch_test.cjs",
-  localpick: "cdp_localpick_test.cjs",
-  local_add: "cdp_local_add_test.cjs",
-  ctxmenu: "cdp_ctxmenu_test.cjs",
-  split: "cdp_split_test.cjs",
-  files: "cdp_files_test.cjs",
-  fileattach: "cdp_fileattach_test.cjs",
-  theme: "cdp_theme_test.cjs",
-  debug: "cdp_debug_test.cjs",
-  restart_close: "cdp_restart_close_test.cjs",
-  remote: "cdp_remote_test.cjs",
-  conn_switch: "cdp_conn_switch_test.cjs",
-  terminal: "cdp_terminal_test.cjs",
-  termcmd: "cdp_termcmd_test.cjs",
-  collapsible: "cdp_collapsible_test.cjs",
-};
+// name -> script. Auto-discovered: every cdp_*_test.cjs in this directory is a
+// suite (add a file, it is picked up - no list to maintain). cdp_*_test2.cjs
+// duplicates and cdp_test_lib.cjs are excluded by the pattern.
+const SUITES = {};
+for (const f of fs.readdirSync(GUI).filter(f => /^cdp_.*_test\.cjs$/.test(f)).sort()) {
+  SUITES[f.replace(/^cdp_/, "").replace(/_test\.cjs$/, "")] = f;
+}
+// suites without the cdp_ prefix
+SUITES.connection_regression = "connection_regression_test.cjs";
+SUITES.ssh_tunnel = "ssh_tunnel_test.cjs";
 
 function pick() {
   const args = process.argv.slice(2);
@@ -64,32 +50,32 @@ function portListening(port) {
 }
 
 // start the remote server detached so it survives this runner's shell
-function startRemoteServer() {
+function startRemoteServer(port) {
   const log = path.join(os.tmpdir(), "remote_srv.log");
   const out = fs.openSync(log, "a");
-  const child = spawn(VENV_PY, ["-m", "coder_agent.server", "--host", "127.0.0.1", "--port", String(REMOTE_PORT)],
+  const child = spawn(VENV_PY, ["-m", "coder_agent.server", "--host", "127.0.0.1", "--port", String(port)],
     { cwd: BACKEND, detached: true, stdio: ["ignore", out, out] });
   child.unref();
   for (let i = 0; i < 30; i++) {
-    if (portListening(REMOTE_PORT)) return;
+    if (portListening(port)) return;
     execSync(IS_WIN ? "ping -n 2 127.0.0.1 >nul" : "sleep 0.5");
   }
-  throw new Error(`remote server did not start on :${REMOTE_PORT} (see ${log}). ` +
+  throw new Error(`remote server did not start on :${port} (see ${log}). ` +
     `If a server from a previous crashed run holds the port, kill it first: ` +
-    (IS_WIN ? `netstat -ano | findstr :${REMOTE_PORT}  (then taskkill /PID <pid> /F)`
-            : `ps -eo pid,cmd | grep "coder_agent.server --port ${REMOTE_PORT}"`));
+    (IS_WIN ? `netstat -ano | findstr :${port}  (then taskkill /PID <pid> /F)`
+            : `ps -eo pid,cmd | grep "coder_agent.server --port ${port}"`));
 }
 
-function stopRemoteServer() {
+function stopRemoteServer(port) {
   try {
     if (IS_WIN) {
-      const out = execSync(`netstat -ano -p tcp | findstr "LISTENING" | findstr /R ":${REMOTE_PORT} "`, { stdio: "pipe" }).toString();
+      const out = execSync(`netstat -ano -p tcp | findstr "LISTENING" | findstr /R ":${port} "`, { stdio: "pipe" }).toString();
       for (const line of out.split(/\r?\n/)) {
         const pid = line.trim().split(/\s+/).pop();
         if (pid) execSync(`taskkill /PID ${pid} /F`, { stdio: "ignore" });
       }
     } else {
-      execSync(`for p in $(ps -eo pid,cmd | awk '/coder_agent.server --host 127.0.0.1 --port ${REMOTE_PORT}/ && !/awk/ {print $1}'); do kill $p 2>/dev/null; done`,
+      execSync(`for p in $(ps -eo pid,cmd | awk '/coder_agent.server --host 127.0.0.1 --port ${port}/ && !/awk/ {print $1}'); do kill $p 2>/dev/null; done`,
         { shell: "/bin/bash", stdio: "ignore" });
     }
   } catch { /* ignore */ }
@@ -108,6 +94,7 @@ function runOne(name, extraEnv = {}) {
   const names = pick();
   const results = [];
   let remoteOwned = false; // true if WE started the server (so we must clean it up)
+  let remotePort = REMOTE_PORT;
 
   // Always build first: the tests run `electron .` against dist/, which is a
   // build artifact. A stale dist would make the suite test old code.
@@ -116,16 +103,31 @@ function runOne(name, extraEnv = {}) {
   if (b.status !== 0) { console.error("[runner] build failed"); process.exit(1); }
 
   for (const name of names) {
-    if (name === "remote" && !portListening(REMOTE_PORT)) {
-      console.log(`\n[runner] starting remote server on :${REMOTE_PORT}`);
-      startRemoteServer();
-      remoteOwned = true;
+    if (name === "remote") {
+      // The test kills/restarts its server to exercise the GUI's
+      // auto-reconnect, so it must ALWAYS run against a server we own.
+      // If :8931 is already in use (the developer's own server - e.g. the
+      // agent this suite is being run through), pick a free port and start
+      // our own server there; never touch the occupied one.
+      let port = REMOTE_PORT;
+      if (portListening(port)) {
+        console.log(`\n[runner] :${port} is in use (not ours) - starting a dedicated remote server on a free port`);
+        for (let p = REMOTE_PORT + 1; p < REMOTE_PORT + 100; p++) {
+          if (!portListening(p)) { port = p; break; }
+        }
+      }
+      if (!portListening(port)) {
+        console.log(`[runner] starting remote server on :${port}`);
+        startRemoteServer(port);
+        remoteOwned = true;
+        remotePort = port;
+      }
+      results.push(runOne(name, { CDP_REMOTE_OWN_SERVER: "1", CDP_REMOTE_PORT: String(port) }));
+      continue;
     }
-    // the remote test kills/restarts the server on :8931 to exercise the GUI's
-    // auto-reconnect; tell it when it may do so (only if we own the server)
-    results.push(runOne(name, { CDP_REMOTE_OWN_SERVER: remoteOwned && name === "remote" ? "1" : "0" }));
+    results.push(runOne(name));
   }
-  if (remoteOwned) stopRemoteServer();
+  if (remoteOwned) stopRemoteServer(remotePort);
 
   console.log("\n================ SUMMARY ================");
   let allOk = true;

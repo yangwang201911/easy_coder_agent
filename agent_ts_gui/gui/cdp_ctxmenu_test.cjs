@@ -1,8 +1,25 @@
 // Verify the sessions list: multi-select (ctrl/shift click) + contextmenu shows the menu.
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
-const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, "..") });
+// a scratch project with 4 pre-seeded sessions so the list has items to
+// select / right-click (the real repo's .agent history is not testable data)
+const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agent-ctxmenu-test-"));
+const cache = path.join(testRoot, ".agent", "sessions");
+fs.mkdirSync(cache, { recursive: true });
+for (let i = 1; i <= 4; i++) {
+  const sid = `20260101-000000-test0${i}`;
+  fs.writeFileSync(path.join(cache, sid + ".json"), JSON.stringify({
+    id: sid, head: "t1",
+    turns: [{ id: "t1", parent_id: null, prompt: `seed turn ${i}`, task_type: "general",
+      messages: [], base_messages: null, archive: [], files_changed: [],
+      ran_commands: false, status: "done", final_text: "", subtasks: [], created: i }],
+  }));
+}
+
+const app = spawnApp({ root: testRoot });
 
 (async () => {
   const url = await getWsUrl(app.port);

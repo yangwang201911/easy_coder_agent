@@ -8,7 +8,7 @@ from typing import Callable
 from ..config import AppConfig
 from .base import LLMCancelled, LLMChunk, LLMError, LLMProvider, ToolCall, Usage
 from .openai_compat import OpenAICompatProvider
-from .server_info import ContextInfo, fetch_context_info, probe_vision
+from .server_info import ContextInfo, fetch_context_info, probe_effort, probe_vision
 from .think_parser import ThinkParser
 from .toolparse import extract_text_tool_calls
 
@@ -53,6 +53,7 @@ __all__ = [
     "create_provider",
     "extract_text_tool_calls",
     "fetch_context_info",
+    "probe_effort",
     "probe_vision",
     "register_provider",
 ]

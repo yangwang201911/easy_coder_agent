@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import knowledge
@@ -57,6 +57,7 @@ class AgentResult:
     final_text: str = ""
     steps: int = 0
     error: str = ""
+    usage: dict = field(default_factory=dict)  # {prompt, completion, steps, ttft_avg_s, tool_s, wall_s}
 
 
 class _ThinkLimit(Exception):
@@ -83,11 +84,15 @@ class Agent:
         cancel: threading.Event,
         steer: Optional[threading.Event] = None,
         steer_prompt: Optional[Callable[[], str]] = None,
+        plan_mode: bool = False,
     ) -> None:
         self.id = agent_id
         set_agent_id(agent_id)  # labelled in prompt dumps (thread-local)
         self.provider = provider
         self.registry = registry
+        # Plan mode: the agent explores with read-only tools and must call
+        # exit_plan_mode (user approval) before any mutation is possible.
+        self.plan_mode = plan_mode
         self.tool_ctx = tool_ctx
         self.policy = policy
         self.approver = approver
@@ -104,10 +109,23 @@ class Agent:
         self.ran_commands = False
         self._fail_streak = 0  # consecutive failing build/run commands
         self._injected: set[str] = set()  # skills already injected during this run
+        self._touched: list[str] = []  # file paths read/written this turn (re-injected after compression)
         self._tools = registry.schemas()
+        self._known_tools = set(registry.names())  # refreshed each step (exit_plan_mode swaps the registry)
 
     # -------------------------------------------------------------- events
     def _emit(self, kind: str, **data) -> None:
+        if kind == "approval_resolved":
+            from . import audit
+
+            audit.record(
+                self.tool_ctx.root,
+                tool=data.get("tool", ""),
+                args=data.get("args", {}),
+                decision="allow" if data.get("allow") else ("deny" if data.get("auto") else "reject"),
+                reason=str(data.get("reason", "")),
+                auto=bool(data.get("auto")),
+            )
         self.bus.emit(kind, self.id, **data)
 
     # ----------------------------------------------------------- compaction
@@ -121,9 +139,28 @@ class Agent:
                    ratio=tokens / max(1, self.ctx_mgr.cfg.max_tokens), exact=False)
         if not self.ctx_mgr.needs_compression(messages, self._tools):
             return
+        # pre_compact hook: exit code 2 skips compression for this step
+        hooks = self.tool_ctx.hooks
+        if hooks is not None and hooks.run("pre_compact").blocked:
+            self._emit("warning", text="compaction skipped by hook")
+            return
         self._emit("status", state="waiting_model", detail="compressing context")
         new, info = self.ctx_mgr.compress(messages, self._tools, self._summarize)
         messages[:] = new
+        # the read cache is now stale: the cached content was summarised away,
+        # so a repeat read must return the full content again, not the stub
+        self.tool_ctx.turn_cache.clear()
+        # re-inject the working state the summary cannot carry: the todo list
+        # (also shown every step) and the files touched this turn, so the model
+        # knows what to re-read instead of guessing
+        note = ["[Context was compressed. Current state:]"]
+        todo = todo_block(self.tool_ctx.todos)
+        if todo:
+            note.append(todo)
+        if self._touched:
+            recent = list(dict.fromkeys(self._touched))[-10:]
+            note.append("Files read/modified in this session (re-read what you need): " + ", ".join(recent))
+        messages.append({"role": "user", "content": "\n".join(note)})
         if on_compact:
             on_compact(list(new))
         self._emit("context_compressed", before=info.before, after=info.after, algorithm=info.algorithm)
@@ -188,9 +225,23 @@ class Agent:
 
         if tool.kind == "exec":
             self.ran_commands = True
+        if tool.name in ("read_file", "write_file", "apply_patch") and args.get("path"):
+            self._touched.append(str(args["path"]))
         self._emit("status", state="running_tool", detail=tc.name)
+        # pre_tool hook: exit code 2 blocks the call and feeds stderr back to the model
+        hooks = self.tool_ctx.hooks
+        if hooks is not None:
+            hr = hooks.run("pre_tool", tool=tc.name, args=args)
+            if hr.blocked:
+                text = "BLOCKED by hook: " + (hr.messages[0] if hr.messages else "")
+                self._emit("tool_result", name=tc.name, ok=False, text=text, id=tc.id)
+                return text, []
         ok, out = self.registry.execute(tc.name, args, self.tool_ctx)
         text = self._after_tool(tool, args, ok, out.text)
+        if hooks is not None:
+            hr = hooks.run("post_tool", tool=tc.name, args=args, status="ok" if ok else "error", output=out.text)
+            if hr.messages:
+                text += "\n[hook] " + " | ".join(hr.messages)
         self._emit("tool_result", name=tc.name, ok=ok, text=text, id=tc.id)
         return text, (out.images if ok else [])
 
@@ -233,7 +284,32 @@ class Agent:
 
     def _authorise(self, tool, args: dict) -> Optional[str]:
         """Return an error text if the call must not run, else None."""
-        if tool.kind == "read":
+        if tool.kind in ("read", "action"):
+            # actions (browser clicks, todos, ...) need no approval; read tools
+            # only when they touch a sensitive file (secrets, keys)
+            if tool.kind == "read" and "path" in args:
+                try:
+                    subject = self.tool_ctx.rel(self.tool_ctx.resolve(str(args["path"])))
+                except Exception:
+                    subject = str(args["path"])
+                decision = self.policy.check_read(subject)
+                if decision.action == "allow":
+                    return None
+                if decision.action == "deny":
+                    self._emit("approval_resolved", tool=tool.name, args=args, allow=False, auto=True, reason=decision.reason)
+                    return f"DENIED by policy ({decision.reason}). Do not retry this; choose a different approach."
+                req = ApprovalRequest(
+                    kind="read", tool=tool.name, title=subject,
+                    detail=f"Read sensitive file: {subject}", args=args,
+                    suggested_rule=self.policy.suggest_rule("write", {"path": subject}),
+                )
+                self._emit("status", state="waiting_user", detail=req.title)
+                self._emit("approval_requested", request=req)
+                resp = self.approver(req) if self.approver else ApprovalResponse(False, "no approver available")
+                self._emit("approval_resolved", tool=tool.name, args=args, allow=resp.allow, auto=False, reason=resp.feedback)
+                if not resp.allow:
+                    fb = f" User feedback: {resp.feedback}" if resp.feedback else ""
+                    return f"REJECTED by the user.{fb}"
             return None
         ctx = self.tool_ctx
         if tool.kind == "network":
@@ -261,10 +337,10 @@ class Agent:
             decision = self.policy.check_write(subject)
 
         if decision.action == "deny":
-            self._emit("approval_resolved", allow=False, auto=True, reason=decision.reason)
+            self._emit("approval_resolved", tool=tool.name, args=args, allow=False, auto=True, reason=decision.reason)
             return f"DENIED by policy ({decision.reason}). Do not retry this; choose a different approach."
         if decision.action == "allow":
-            self._emit("approval_resolved", allow=True, auto=True, reason=decision.reason)
+            self._emit("approval_resolved", tool=tool.name, args=args, allow=True, auto=True, reason=decision.reason)
             return None
 
         try:
@@ -288,7 +364,7 @@ class Agent:
         self._emit("status", state="waiting_user", detail=req.title)
         self._emit("approval_requested", request=req)
         resp = self.approver(req) if self.approver else ApprovalResponse(False, "no approver available")
-        self._emit("approval_resolved", allow=resp.allow, auto=False, reason=resp.feedback)
+        self._emit("approval_resolved", tool=tool.name, args=args, allow=resp.allow, auto=False, reason=resp.feedback)
         if resp.allow and resp.remember_rule:
             self.policy.remember(kind, resp.remember_rule, resp.remember_scope)
         if not resp.allow:
@@ -305,10 +381,26 @@ class Agent:
             if on_append:
                 on_append(msg)
 
+        # usage stats for this turn: tokens, TTFT, tool time, wall time
+        t0 = time.time()
+        tok_prompt = tok_completion = 0
+        ttfts: list[float] = []
+        tool_s = 0.0
+
+        def usage_dict(steps: int) -> dict:
+            wall = time.time() - t0
+            d = {
+                "prompt": tok_prompt, "completion": tok_completion, "steps": steps,
+                "ttft_avg_s": round(sum(ttfts) / len(ttfts), 2) if ttfts else 0,
+                "tool_s": round(tool_s, 2), "wall_s": round(wall, 2),
+            }
+            return d
+
         seen: dict[str, int] = {}
+        seen_at: dict[str, int] = {}  # mutation count when the call was last seen
         strikes = 0
+        mutations = 0  # writes/execs since the turn started
         cutoffs = 0
-        known = set(self.registry.names())
         final_text = ""
         try:
             for step in range(1, self.cfg.max_steps + 1):
@@ -321,6 +413,9 @@ class Agent:
                     prompt = self._steer_prompt() if self._steer_prompt else ""
                     add({"role": "user", "content": prompt})
                     self._emit("steer_injected", text=prompt)
+                # exit_plan_mode may have swapped the registry mid-run: refresh names/schemas
+                self._known_tools = set(self.registry.names())
+                self._tools = self.registry.schemas()
                 self._maybe_compress(messages, on_compact)
                 self._emit("status", state="waiting_model", detail=f"step {step}")
 
@@ -343,10 +438,14 @@ class Agent:
                         raise
                 except LLMError as e:
                     self._emit("error", text=str(e))
-                    return AgentResult("error", final_text, step, str(e))
+                    return AgentResult("error", final_text, step, str(e), usage_dict(step))
 
                 if usage:
                     self.ctx_mgr.counter.calibrate(est_raw, usage.prompt_tokens)
+                    tok_prompt += usage.prompt_tokens
+                    tok_completion += usage.completion_tokens
+                if ttft is not None:
+                    ttfts.append(ttft)
                 self._emit(
                     "llm_done",
                     usage={"prompt": usage.prompt_tokens, "completion": usage.completion_tokens} if usage else {},
@@ -360,7 +459,7 @@ class Agent:
                                ratio=used / max(1, self.ctx_mgr.cfg.max_tokens), exact=True)
 
                 if not calls and text:
-                    text, calls = extract_text_tool_calls(text, known)
+                    text, calls = extract_text_tool_calls(text, self._known_tools)
 
                 msg: dict = {"role": "assistant", "content": text}
                 if calls:
@@ -378,7 +477,7 @@ class Agent:
                         continue
                     final_text = text
                     self._emit("agent_finished", status="done", steps=step)
-                    return AgentResult("done", text, step)
+                    return AgentResult("done", text, step, "", usage_dict(step))
 
                 # Split the batch: read-only tools run in parallel (they cannot
                 # interfere with each other), everything else runs one by one in
@@ -395,21 +494,36 @@ class Agent:
                         futs = {pool.submit(self._run_tool, tc): tc for tc in parallel}
                         for fut in futs:
                             tc = futs[fut]
+                            t1 = time.time()
                             results[tc.id] = fut.result()
+                            tool_s += time.time() - t1
                 else:
                     for tc in parallel:  # 0 or 1 read tool: run it inline
+                        t1 = time.time()
                         results[tc.id] = self._run_tool(tc)
+                        tool_s += time.time() - t1
                 for tc in serial:
+                    t1 = time.time()
                     results[tc.id] = self._run_tool(tc)
+                    tool_s += time.time() - t1
                 for tc in calls:
                     if self.cancel.is_set():
                         add({"role": "tool", "tool_call_id": tc.id, "content": "Cancelled by the user before running."})
                         continue
                     key = tc.name + "|" + tc.arguments
+                    # A write/exec since the previous identical call means the agent changed
+                    # something (e.g. re-running the same test after an edit): that is a
+                    # debug iteration, not a loop - reset the counter for this call.
+                    prev_mut = seen_at.get(key, mutations)
+                    if key in seen_at and seen_at[key] != mutations:
+                        seen[key] = 0
                     seen[key] = seen.get(key, 0) + 1
-                    near = [k for k in seen if k != key and k.startswith(tc.name + "|")
-                            and difflib.SequenceMatcher(None, k, key).ratio() > 0.85]
-                    if seen[key] > self.cfg.loop_limit or (near and seen[key] > 1):
+                    seen_at[key] = mutations
+                    # A loop is the same exact call repeated beyond the limit with
+                    # NOTHING changed in between. Re-running a command after an edit
+                    # (or with slightly different args) is iteration, not a loop.
+                    dup = seen[key] > self.cfg.loop_limit and prev_mut == mutations
+                    if dup:
                         strikes += 1
                         result = (
                             "ERROR: you already made this call (or a nearly identical one) several times with "
@@ -419,6 +533,9 @@ class Agent:
                         images = []
                     else:
                         result, images = results[tc.id]
+                        t = self.registry.get(tc.name)
+                        if t is not None and t.kind in ("write", "exec"):
+                            mutations += 1
                     if images and not self._images_supported():
                         result += "\n[image omitted: the configured model is text-only]"
                         images = []
@@ -431,12 +548,12 @@ class Agent:
                             {"type": "text", "text": f"[result of {tc.name}: see the attached image]"},
                             *[{"type": "image_url", "image_url": {"url": im["data_url"]}} for im in images],
                         ]})
-                if strikes >= 3:
+                if strikes >= self.cfg.loop_strikes:
                     self._emit("agent_finished", status="loop", steps=step)
-                    return AgentResult("loop", final_text, step, "agent kept repeating the same calls")
+                    return AgentResult("loop", final_text, step, "agent kept repeating the same calls", usage_dict(step))
 
             self._emit("agent_finished", status="max_steps", steps=self.cfg.max_steps)
-            return AgentResult("max_steps", final_text, self.cfg.max_steps)
+            return AgentResult("max_steps", final_text, self.cfg.max_steps, "", usage_dict(self.cfg.max_steps))
         except LLMCancelled:
             self._emit("agent_finished", status="cancelled", steps=0)
-            return AgentResult("cancelled", final_text, 0)
+            return AgentResult("cancelled", final_text, 0, "", usage_dict(0))

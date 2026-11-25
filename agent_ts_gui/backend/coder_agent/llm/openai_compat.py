@@ -21,7 +21,10 @@ from .think_parser import ThinkParser
 log = logging.getLogger(__name__)
 
 # Transient server/load errors worth retrying with backoff; other 4xx fail fast.
-_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+# 500 is deliberately NOT retryable: a request the server rejects (bad parameter
+# value, unsupported field) fails identically on every retry, so retrying only
+# wastes ~7s of backoff before surfacing the same error.
+_RETRYABLE_STATUS = {408, 409, 429, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.5  # seconds; attempt n waits base * 2**(n-1) (+ jitter)
 
@@ -73,6 +76,7 @@ class OpenAICompatProvider(LLMProvider):
         tools: Optional[list[dict]],
         thinking: Optional[bool],
         max_tokens: Optional[int],
+        send_effort: Optional[bool] = None,
     ) -> dict:
         kw: dict = {
             "model": self.server.model,
@@ -95,7 +99,7 @@ class OpenAICompatProvider(LLMProvider):
         if thinking is False:
             extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
         else:
-            if t.send_effort and t.effort != "default":
+            if (t.send_effort if send_effort is None else send_effort) and t.effort != "default":
                 kw["reasoning_effort"] = t.effort
             if t.enable_thinking is not None:
                 extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = t.enable_thinking
@@ -128,6 +132,7 @@ class OpenAICompatProvider(LLMProvider):
         if self.dump:
             dump_request(self.dump_root, kw)
         stream = None
+        dropped_effort = False
         for attempt in range(1, _MAX_RETRIES + 1):
             if cancel is not None and cancel.is_set():
                 raise LLMCancelled()
@@ -135,6 +140,17 @@ class OpenAICompatProvider(LLMProvider):
                 stream = self.client.chat.completions.create(**kw)
                 break
             except openai.OpenAIError as e:
+                if (not dropped_effort and "reasoning_effort" in kw
+                        and "reasoning_effort" in str(e).lower()):
+                    # the server rejects the effort value (e.g. Ollama without
+                    # reasoning support): drop the field and retry once instead
+                    # of burning all retries on a deterministic 500
+                    rejected = kw.pop("reasoning_effort")
+                    dropped_effort = True
+                    log.warning("server rejected reasoning_effort=%s; retrying without it", rejected)
+                    yield LLMChunk("status", f"the server does not support reasoning_effort='{rejected}'; "
+                                             "continuing without it (change the effort in Settings if needed)")
+                    continue
                 if attempt >= _MAX_RETRIES or not _is_retryable(e):
                     raise LLMError(f"{type(e).__name__}: {e}") from e
                 delay = _BACKOFF_BASE * (2 ** (attempt - 1))

@@ -53,14 +53,19 @@ class Engine:
         self.sections = PromptSections()
         self.ctx_mgr = ContextManager(config.context)
         self.registry: ToolRegistry = default_registry()
-        self.mcp = McpHub(load_servers(self.root, self.policy.data))
+        self.mcp = McpHub(load_servers(self.root, self.policy.data),
+                         readonly_hint=(self.policy.data.get("mcp") or {}).get("readonly_hint", True))
         self.mcp_tool_names: list[str] = []
         for t in self.mcp.start():
             self.registry.register(t)
             self.mcp_tool_names.append(t.name)
         self.asker: Optional[Callable[[dict], Optional[dict]]] = None  # set by the server: asks the user a question
+        from .hooks import HookRunner
+        self.hooks = HookRunner(self.root)
         self.cancel_event = threading.Event()
         self._lock = threading.Lock()
+        from .tools.shell import ShellManager  # persistent shell sessions + background jobs
+        self._shell_manager = ShellManager(self.root)
         # Steer: the user sends a new message while a turn is running. The agent
         # loop picks it up at the next safe point (top of step) and continues.
         self._steer_event = threading.Event()
@@ -69,6 +74,19 @@ class Engine:
     # ------------------------------------------------------------- settings
     def close(self) -> None:
         self.mcp.close()
+        # persistent shell sessions and their background jobs die with the engine
+        try:
+            if self._shell_manager is not None:
+                self._shell_manager.close()
+        except Exception:  # noqa: BLE001 - best effort during shutdown
+            pass
+
+    def _config_for(self, effort: Optional[str]) -> AppConfig:
+        """The config for one turn: an explicit ``effort`` (GUI selector) overrides the saved setting."""
+        if not effort:
+            return self.config
+        thinking = self.config.thinking.model_copy(update={"effort": effort})
+        return self.config.model_copy(update={"thinking": thinking})
 
     def apply_config(self, config: AppConfig) -> None:
         """Call between runs after the user edited settings."""
@@ -81,6 +99,12 @@ class Engine:
 
     def cancel(self) -> None:
         self.cancel_event.set()
+
+    def _mark_ran_commands(self) -> None:
+        """A sub-agent ran shell commands: the current turn has side effects (no rollback)."""
+        path = self.session.path()
+        if path:
+            path[-1].ran_commands = True
 
     def steer(self, prompt: str) -> None:
         """Queue a user message for the running turn (the GUI's "send while running").
@@ -101,11 +125,17 @@ class Engine:
         prompt: str,
         task_type: Optional[str] = None,
         images: Optional[list[dict]] = None,
+        effort: Optional[str] = None,
+        plan: bool = False,
     ) -> AgentResult:
         """Run one user turn to completion (blocking - call from a worker thread).
 
         ``images``: [{"name": str, "data_url": "data:image/..."}] sent to the model
-        as image_url parts of the user message (needs a vision-capable model)."""
+        as image_url parts of the user message (needs a vision-capable model).
+        ``effort``: thinking effort for this turn (GUI selector); overrides the
+        saved setting when given.
+        ``plan``: plan mode - the agent explores with read-only tools and must
+        call exit_plan_mode (user approval) before it may write anything."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a turn is already running")
         turn: Optional[Turn] = None
@@ -118,7 +148,10 @@ class Engine:
             self.session.save()
             self.bus.emit("turn_started", turn_id=turn.id, task_type=tt.name, prompt=prompt, images=turn.images)
 
-            provider = self._provider_override or create_provider(self.config)
+            # effort for this turn: GUI selector > task type suggestion > saved setting
+            turn_effort = effort or tt.effort
+            cfg = self._config_for(turn_effort)
+            provider = self._provider_override or create_provider(cfg)
             registry = self.registry.subset([*tt.tools, *self.mcp_tool_names]) if tt.tools else self.registry
             # carry the checklist over from the previous turn so it survives across turns
             prev = self.session.path()
@@ -128,17 +161,37 @@ class Engine:
                 cancel=self.cancel_event,
                 emit=lambda kind, data: self.bus.emit(kind, "main", **data),
                 snapshots=self.session.snapshots,
+                shell=self._shell_manager,
                 max_output_chars=self.config.context.tool_output_max_chars,
                 extra_roots=self.policy.extra_roots,
                 ask_user=self.asker,
                 todos=list(prev_todos),
+                engine=self,
+                hooks=self.hooks,
             )
+            self.hooks.run("session_start", status="turn_start")
+            # plan mode: explore with read-only tools; exit_plan_mode (user approval)
+            # swaps in the full registry mid-run
+            if plan:
+                registry = registry.readonly()
+                tool_ctx.todos = []
             agent = Agent(
                 "main", provider, registry, tool_ctx, self.policy, self.approver,
                 self.ctx_mgr, self.bus, self.config.agent, self.config.thinking, self.cancel_event,
                 steer=self._steer_event, steer_prompt=lambda: self._steer_prompt,
+                plan_mode=plan,
             )
+            tool_ctx.agent = agent
             system = PromptBuilder(self.root, self.task_types, self.sections).build(tt)
+            if plan:
+                system += (
+                    "\n\n# PLAN MODE (this turn)\n"
+                    "You are in plan mode: you can ONLY read/explore (files, search, web). "
+                    "You cannot write files, run commands or use git. Explore the codebase thoroughly, "
+                    "then call exit_plan_mode with a concrete plan as markdown (bullet steps, naming the "
+                    "files to touch). The user must approve it; only after approval do you get write access. "
+                    "If the user rejects the plan, revise it and call exit_plan_mode again."
+                )
             messages = [{"role": "system", "content": system}, *self.session.build_messages()]
 
             def on_append(msg: dict) -> None:
@@ -153,8 +206,10 @@ class Engine:
             result = agent.run(messages, on_append=on_append, on_compact=on_compact)
             turn.ran_commands = agent.ran_commands
             turn.todos = list(tool_ctx.todos)
+            turn.usage = result.usage
             self.session.finish_turn(turn, result.status, result.final_text)
-            self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error)
+            self.hooks.run("turn_end", status=result.status)
+            self.bus.emit("turn_finished", turn_id=turn.id, status=result.status, error=result.error, usage=result.usage)
             self.bus.emit("status", state="idle", detail="")
             if self.config.agent.memory_extraction and result.status == "done":
                 # background: extraction must not hold the turn lock
@@ -172,6 +227,41 @@ class Engine:
         saved = extract_memory(provider, self.root, prompt, final_text)
         if saved:
             self.bus.emit("memory_saved", notes=saved)
+
+    def compact(self, hint: str = "") -> dict:
+        """User-triggered compaction (the GUI's ``/compact`` command).
+
+        Summarises the whole conversation along the active path into a structured
+        summary and stores it as the new base history. Returns the token counts
+        before/after. Blocked while a turn is running (the lock is held)."""
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("a turn is running - cannot compact now")
+        try:
+            msgs = self.session.build_messages()
+            if len(msgs) < 4:
+                return {"ok": False, "reason": "conversation too short to compact"}
+            provider = self._provider_override or create_provider(self.config)
+
+            def summarize(m: list[dict]) -> str:
+                return provider.complete(m, self.cancel_event, thinking=False, max_tokens=2500)
+
+            before = self.ctx_mgr.tokens(msgs)
+            new, info = self.ctx_mgr.compress(msgs, None, summarize)
+            # store as the base history of a synthetic "compaction" turn so the
+            # next turn starts from the summary; the old messages are archived
+            path = self.session.path()
+            if path:
+                head = path[-1]
+                head.archive.extend(head.messages)
+                head.messages = []
+                head.base_messages = [m for m in new if m.get("role") != "system"]
+            else:
+                self.session.save()
+            self.session.save()
+            self.bus.emit("context_compressed", before=info.before, after=info.after, algorithm=info.algorithm, manual=True)
+            return {"ok": True, "before": before, "after": info.after, "algorithm": info.algorithm}
+        finally:
+            self._lock.release()
 
     # ------------------------------------------------------ plan (subtasks)
     def submit_plan(

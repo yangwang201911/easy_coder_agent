@@ -1,14 +1,19 @@
 // Smoke test: remote-mode connection. A standalone coder-agent-server is
-// already listening on 127.0.0.1:8931 (started separately, like on a real
-// remote machine). The GUI is pointed at it via connection.json (mode
-// "remote") and must NOT spawn its own backend.
+// listening on 127.0.0.1:<CDP_REMOTE_PORT, default 8931> (started by the
+// runner, like a real remote machine). The GUI is pointed at it via
+// connection.json (mode "remote") and must NOT spawn its own backend.
+// The auto-reconnect part kills/restarts ITS server - never a port it does
+// not own (the runner only points it at servers it started itself).
 const { spawnApp, killApp, getWsUrl, connectCdp, wait, venvPython } = require("./cdp_test_lib.cjs");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
 const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..");
-const PORT = 8931;
+// the port the test server listens on: the runner sets CDP_REMOTE_PORT when it
+// starts a dedicated server (8931 may be the developer's own running server,
+// which the test must never kill)
+const PORT = parseInt(process.env.CDP_REMOTE_PORT || "8931", 10);
 // the test server runs on this machine, so the server-side home dir name is
 // the local user name (the name prompt defaults to the home dir's base name)
 const HOME_NAME = os.homedir().split(/[\\/]/).pop();
@@ -69,6 +74,11 @@ function check(label, ok) {
     const c = JSON.parse(conn);
     check("connection tab shows remote", c.mode === "remote");
     check("connection tab host/port", c.host === "127.0.0.1" && String(c.port) === String(PORT));
+    // close the Settings dialog: while it is open the GUI deliberately
+    // suppresses the backend-down chip (the user is fixing the connection),
+    // so the auto-reconnect check below would never see it
+    await evalJs("document.querySelector('#modal .close-x') && document.querySelector('#modal .close-x').click()");
+    await wait(300);
 
     // 4) add-project in remote mode: a text input validated via the list_dir
     // RPC (over the remote connection). A bad path must show an error; a
@@ -137,8 +147,10 @@ function check(label, ok) {
     if (srvOwnedHere) {
       stopSrv();
       await wait(1500);
+      // the chip appears on the NEXT failed reconnect attempt; the GUI's
+      // backoff can be up to 15s, so allow ~45s
       let banner = false;
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 90; i++) {
         banner = await evalJs("!document.getElementById('backend-status').classList.contains('hidden')");
         if (banner) break;
         await wait(500);

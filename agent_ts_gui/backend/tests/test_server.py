@@ -218,6 +218,8 @@ def test_full_turn_with_approval(server_process):
             r = await c.call("open_project", root=str(project))
             assert r["root"] == str(project)
             assert "general" in r["task_types"]
+            # the connection probe reports the (fake) model server's state
+            assert r["model_probe"]
 
             await c.call("submit", prompt="write hello.txt", task_type="general")
 

@@ -47,7 +47,7 @@ function check(name, cond) {
   check("dark data-theme", (await dt()) === "dark");
   check("dark body bg rgb(30,30,30)", (await bg()) === "rgb(30, 30, 30)");
   check("dark panel rgb(37,37,38)",
-    (await evalJs("getComputedStyle(document.getElementById('toolbar')).backgroundColor")) === "rgb(37, 37, 38)");
+    (await evalJs("getComputedStyle(document.getElementById('left')).backgroundColor")) === "rgb(37, 37, 38)");
   check("dark persisted", (await evalJs("localStorage.getItem('agent_ts_gui.theme')")) === "dark");
 
   // 3) solarized

@@ -45,8 +45,9 @@ class SamplingConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     max_tokens: int = 131072  # server-side cache / context length (128k)
-    compress_threshold: float = 0.95  # compress when usage >= this ratio
+    compress_threshold: float = 0.80  # compress when usage >= this ratio (0.95 left little headroom)
     compress_target: float = 0.60  # ... down to this ratio
+    output_reserve_tokens: int = 8192  # reserve for the model's reply: trigger earlier when tokens + reserve >= max * threshold
     algorithm: str = "summarize"
     keep_recent_units: int = 10  # newest message units never summarised
     tool_output_max_chars: int = 12000  # cap for a single tool result
@@ -56,6 +57,7 @@ class AgentConfig(BaseModel):
     max_steps: int = 120
     parallelism: int = 1  # concurrent sub-agents (1 for single-GPU Ollama)
     loop_limit: int = 3  # identical tool calls tolerated before intervening
+    loop_strikes: int = 3  # repeated-call strikes before the run ends with status=loop
     auto_skills: bool = True  # inject skills whose `triggers` match a failing command's output
     failure_hint_after: int = 2  # consecutive failed commands before the "list suspects" nudge (0 = off)
     gdb_hint_after: int = 4  # consecutive failed commands before the "use the debugger" nudge (0 = off)

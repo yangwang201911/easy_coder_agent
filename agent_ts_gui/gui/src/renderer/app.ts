@@ -144,11 +144,12 @@ const S = {
   pendingRoot: null as string | null, // project picked while the backend was not ready
   taskTypes: [] as string[],
   effort: "medium",
+  efforts: [] as string[], // effort values the server accepts (empty = not probed yet)
   mode: 0, // 0 = single agent, 1 = plan & subtasks
   busy: false,
   ctxMax: 131072,
-  compressThreshold: 0.95,
-  compressTarget: 0.5,
+  compressThreshold: 0.80,
+  compressTarget: 0.60,
   config: null as Record<string, any> | null,
   state: "idle",
   stateDetail: "",
@@ -165,6 +166,7 @@ const S = {
   turnStart: 0,
   approvalPolicy: null as string | null, // user approval policy text (for the input footer chip)
   sessionApprove: false, // "allow all in this session" is active (reset on new session / project)
+  permMode: "default" as string, // permission mode: default | accept_edits | plan | bypass
   attachments: [] as { name: string; data_url: string }[],
   fileAttached: null as string | null,
   toolPaths: new Map<string, string>(), // tool_call id -> file path (for clickable results)
@@ -268,6 +270,14 @@ async function refreshServerInfo() {
   btn.title = "";
   const r = await call("context_info");
   if (r && r.__error) { btn.textContent = "server cache: ?"; return; }
+  if (Array.isArray(r.efforts) && r.efforts.length) {
+    S.efforts = r.efforts;
+    // the current selection may not be supported by this server: fall back to a value that is
+    if (S.effort !== "default" && !S.efforts.includes(S.effort)) {
+      S.effort = S.efforts.includes("medium") ? "medium" : S.efforts[S.efforts.length - 1];
+      refreshEffortLabel();
+    }
+  }
   const info = r.context;
   const mx = r.configured_max;
   if (!info.loaded && !info.model_max) {
@@ -290,6 +300,14 @@ async function refreshServerInfo() {
       "Settings > Context & agent > Detect.");
   }
   tip.push("Click to refresh.");
+  const m = await call("mcp_status");
+  if (m && !m.__error && Object.keys(m.servers ?? {}).length) {
+    const parts = Object.entries(m.servers as Record<string, any>).map(([n, s]: [string, any]) =>
+      s.ok ? `mcp ${n}: ${s.tools} tools` : `mcp ${n}: FAILED (${s.error})`);
+    if (m.lazy) parts.push("mcp: lazy loading (use mcp_search)");
+    tip.push(...parts);
+    if (parts.some((p: string) => p.includes("FAILED"))) btn.className = "flat warn";
+  }
   btn.title = tip.join("\n");
 }
 
@@ -355,12 +373,21 @@ function refreshApprovalLabel() {
   if (S.sessionApprove) {
     text.textContent = "Allow all in this session";
     btn.title = "Everything not denied in the approval policy runs without asking, until this session ends (new session / project resets it).\nClick to open Settings > Approval";
+  } else if (S.permMode === "bypass") {
+    text.textContent = "Bypass";
+    btn.title = "All tools run without asking (no approval prompts).\nClick to change mode";
+  } else if (S.permMode === "accept_edits") {
+    text.textContent = "Accept edits";
+    btn.title = "File writes in trusted paths are auto-approved; commands/network still ask.\nClick to change mode";
+  } else if (S.permMode === "plan") {
+    text.textContent = "Plan (read-only)";
+    btn.title = "Read-only mode: no writes, commands, network or MCP allowed.\nClick to change mode";
   } else if (auto) {
     text.textContent = "Auto-approve";
     btn.title = `Approval policy: auto_approve_all = true\nClick to open Settings > Approval`;
   } else {
     text.textContent = "Default permissions";
-    btn.title = "Ask before running commands / writing files\nClick to open Settings > Approval";
+    btn.title = "Ask before running commands / writing files\nClick to change mode";
   }
 }
 
@@ -400,12 +427,18 @@ async function openProject(root: string, sessionId: string | null = null) {
   if (typeof renderProjList === "function") void renderProjList();
   document.title = `Coder Agent: ${r.root}`;
   refreshEffortLabel();
+  // connection probe: surface a clear hint when the configured base_url does
+  // not answer (e.g. 127.0.0.1:11434 while the service runs elsewhere)
+  if (r.model_probe && /unavailable/.test(String(r.model_probe))) {
+    chat.line(`\n[model server unreachable] ${r.config?.server?.base_url ?? "?"}: ${r.model_probe}\nCheck Settings > Model (base_url / api_key).`, "c-error");
+  }
   // the last-project record is only meaningful for local paths; in remote mode
   // the project lives on the server machine (remembered by name in localStorage)
   window.api.getConnMode().then((m) => { if (m === "local") window.api.setLastProject(r.root); }).catch(() => {});
   reloadTaskTypes();
   refreshModelLabel();
   refreshApprovalLabel();
+  call("get_mode").then((r) => { if (r && !r.__error && r.mode) { S.permMode = r.mode; refreshApprovalLabel(); } });
   void (async () => {
     const r = await call("approval_policy");
     if (r && !r.__error) { S.approvalPolicy = r.text; refreshApprovalLabel(); }
@@ -1363,7 +1396,7 @@ async function answerQuietly(reqId: string, response: Record<string, any>) {
 
 async function approvalDialog(req: Record<string, any>): Promise<Record<string, any> | undefined> {
   const what = req.kind === "command" ? "Run command" : req.kind === "network" ? "Network access"
-    : req.kind === "mcp" ? "MCP tool" : "Write file";
+    : req.kind === "mcp" ? "MCP tool" : req.kind === "read" ? "Read sensitive file" : "Write file";
   const rule = String(req.suggested_rule ?? "");
   const rows: PanelRow[] = [{ label: "Allow once" }, { label: "Allow all in this session" }];
   const ruleIdx = rule ? rows.push({
@@ -1965,7 +1998,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
       const mode = (cPage.querySelector(".c-mode") as HTMLSelectElement).value as "local" | "remote" | "ssh";
       if (mode === "ssh") {
         const sel = sshHosts.find((x) => x.name === selHost);
-        if (!sel) { showMsg(cPage, false, "Select an SSH host first (Add host, then click it in the list)."); return; }
+        if (!sel) { showMsg(cPage, false, "Select an SSH host first (Add host, then click it in the list)."); btn.disabled = false; return; }
         m.textContent = "Connecting (a password window follows if the server asks)...";
         const sr = await window.api.sshConnect({
           host: sel,
@@ -1979,7 +2012,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
           return;
         }
         showMsg(cPage, true, `Connected to ${sr.url}. The current project will be reopened.`);
-        void refreshRemoteLabel();
+        void refreshConnLabel();
         setTimeout(() => done(false), 400);
         return;
       }
@@ -1999,7 +2032,7 @@ async function settingsDialog(initialTab = "model"): Promise<boolean> {
         showMsg(cPage, true, "No change.");
       }
       // close the dialog: the connection is applied and saved (or unchanged)
-      void refreshRemoteLabel();
+      void refreshConnLabel();
       setTimeout(() => done(false), r.reconnected ? 400 : 1200);
     });
 
@@ -2250,7 +2283,43 @@ async function send() {
   // starts a fresh session and enters it first. Resolve the attached file
   // BEFORE that (startNewSession clears the file view and would silently
   // drop the attachment).
-  const fullPrompt = await withAttachedFile(prompt);
+  // /plan: run this turn in plan mode (read-only explore -> user approves the plan)
+  let planMode = false;
+  let promptText = prompt;
+  if (/^\/plan\b/.test(promptText)) {
+    planMode = true;
+    promptText = promptText.replace(/^\/plan\s*/, "").trim();
+    if (!promptText) { chat.line("\n[error] /plan needs a task, e.g. /plan add a settings page", "c-error"); return; }
+  }
+  let fullPrompt = await withAttachedFile(promptText);
+  // /compact: user-triggered context compaction (summarises the conversation)
+  if (/^\/compact\b/.test(prompt)) {
+    const hint = prompt.replace(/^\/compact\s*/, "").trim();
+    userPromptCard(prompt, `[command]  ${stampOf(Date.now() / 1000)}`);
+    const r = await call("compact", { hint });
+    if (r && r.__error) { chat.line(`\n[error] /compact: ${r.__error}`, "c-error"); return; }
+    if (r && !r.ok) { chat.line(`\n[compact] ${r.reason || "not done"}`, "c-warn"); return; }
+    chat.line(`\n[compact] ${r.before.toLocaleString()} → ${r.after.toLocaleString()} tokens (${r.algorithm})`, "c-ok");
+    return;
+  }
+  // slash command: "/skill-name <rest>" expands the skill's full body into the
+  // prompt (progressive disclosure, like Claude Code's /skill). The model gets
+  // the instructions inline and follows them for this turn.
+  const slash = prompt.match(/^\/([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/);
+  if (slash) {
+    const sb = await call("skill_body", { name: slash[1] });
+    if (sb && sb.__error) {
+      chat.line(`\n[error] /${slash[1]}: ${sb.__error}`, "c-error");
+      return;
+    }
+    if (sb && sb.error) {
+      chat.line(`\n[error] /${slash[1]}: ${sb.error} (available: ${(sb.available || []).join(", ")})`, "c-error");
+      return;
+    }
+    const rest = (slash[2] || "").trim();
+    fullPrompt = `[skill '${sb.name}' was invoked with /${slash[1]} - follow these instructions for this task]\n${sb.body}\n\n---\nTask: ${rest || "(see the skill instructions)"}`;
+    chat.line(`\n[loaded skill '${sb.name}' via /${slash[1]}]`, "c-soft");
+  }
   // a turn is already running: queue the message as a steer. The agent picks
   // it up at the next safe point (right away if it is between model calls,
   // after the current stream is aborted if it is mid-reply, after the running
@@ -2272,7 +2341,9 @@ async function send() {
     if (images.length) chat.line("\n[plan mode: images are not sent to the planner]", "c-warn");
     call("submit_plan", { goal: fullPrompt }).then((r) => afterSubmit(r));
   } else {
-    call("submit", { prompt: fullPrompt, task_type: taskType, images }).then((r) => afterSubmit(r));
+    // effort: the GUI selector ("default" = use the saved setting)
+    if (planMode) chat.line("\n[plan mode: read-only explore; you will approve the plan before execution]", "c-soft");
+    call("submit", { prompt: fullPrompt, task_type: taskType, images, effort: S.effort === "default" ? null : S.effort, plan: planMode }).then((r) => afterSubmit(r));
   }
 }
 
@@ -2408,6 +2479,14 @@ function onEvent(ev: AgentEvent) {
       S.stepsBody = null;
     }
     if (d.status !== "ok") chat.line(`\n-- ${d.status} --`, "c-muted");
+    if (d.usage && (d.usage.prompt > 0 || d.usage.completion > 0)) {
+      const u = d.usage;
+      chat.line(
+        `\n[usage] ${u.steps} steps | ${u.prompt} prompt + ${u.completion} completion tok | ` +
+        `ttft avg ${u.ttft_avg_s}s | tools ${u.tool_s}s | wall ${u.wall_s}s`,
+        "c-muted"
+      );
+    }
     if (S.curTurnId && S.curTurnBlocks.length) turnActionBar(S.curTurnId, S.curTurnBlocks);
     S.curTurnId = null;
     S.curTurnBlocks = [];
@@ -3055,8 +3134,10 @@ $("mode-combo-btn").addEventListener("click", (e) => {
 $("effort-combo").addEventListener("click", (e) => {
   e.stopPropagation();
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  // only offer the values the server accepts (probed at startup); until then, the full set
+  const values = S.efforts.length ? ["default", ...S.efforts] : ["default", "none", "low", "medium", "high"];
   showMenu(rect.left, rect.bottom + 4,
-    ["default", "none", "low", "medium", "high"].map((v) => ({
+    values.map((v) => ({
       label: v + (v === S.effort ? "  ✓" : ""),
       fn: () => { S.effort = v; refreshEffortLabel(); },
     })));
@@ -3071,9 +3152,26 @@ $("conn-mode-label").addEventListener("click", () => {
   if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
   void settingsDialog("connection").then((saved) => { if (saved) { refreshConnLabel(); chat.line("\n[settings saved]", "c-ok"); } });
 });
-$("approval-label").addEventListener("click", () => {
-  if (S.busy) { chat.line("\n[settings disabled while a turn is running]", "c-muted"); return; }
-  void settingsDialog("approval").then((saved) => { if (saved) { refreshApprovalLabel(); chat.line("\n[settings saved]", "c-ok"); } });
+$("approval-label").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const modes = [
+    { v: "default", label: "Default (ask before writes/commands)" },
+    { v: "accept_edits", label: "Accept edits (auto-approve file writes)" },
+    { v: "plan", label: "Plan (read-only)" },
+    { v: "bypass", label: "Bypass (no approval prompts)" },
+  ];
+  showMenu(rect.left, rect.top - modes.length * 22 - 4, modes.map((m) => ({
+    label: m.label + (m.v === S.permMode ? "  ✓" : ""),
+    fn: () => {
+      S.permMode = m.v;
+      refreshApprovalLabel();
+      call("set_mode", { mode: m.v }).then((r) => {
+        if (r && r.__error) chat.line(`\n[mode] ${r.__error}`, "c-error");
+        else chat.line(`\n[mode] ${m.v}`, "c-ok");
+      });
+    },
+  })));
 });
 $("server-ctx-btn").addEventListener("click", refreshServerInfo);
 // start a fresh session and enter its chat view; false on error (already
@@ -3678,7 +3776,7 @@ async function resolveProjectRoot(): Promise<string | null> {
 // banner is up (or the connection URL changed) re-open the project on the new
 // backend so a local<->remote switch restores the working session.
 window.api.onBackendUrl(async (url: string) => {
-  void refreshRemoteLabel();
+  void refreshConnLabel();
   if (!bootDone || !bootProjectDone) return; // boot() opens the first project itself
   const urlChanged = url !== lastBackendUrl;
   lastBackendUrl = url;

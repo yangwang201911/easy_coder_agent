@@ -266,6 +266,7 @@ class ApprovalPolicy:
         user_file: Optional[Path] = None,
         project_file: Optional[Path] = None,
         root: Optional[Path] = None,
+        mode: str = "default",
     ):
         self.data = data or {}
         self.user_file = user_file
@@ -277,6 +278,8 @@ class ApprovalPolicy:
         # Session-scoped auto-approval ("allow all in this session"): set by the GUI,
         # lives only in this process - it is NOT persisted to the policy files.
         self.session_approve = False
+        # Permission mode: default | accept_edits | plan | bypass
+        self.mode = mode
         self._refresh_roots()
 
     @classmethod
@@ -376,7 +379,23 @@ class ApprovalPolicy:
         d = self.data.get(section, {}).get("default", "ask")
         return Decision("deny" if d == "deny" else "ask", f"no {section} rule matched")
 
+    def _mode_decision(self, kind: str) -> Optional[Decision]:
+        """Return a Decision if the current permission mode overrides the normal checks, else None.
+
+        plan:    deny writes/exec/network/mcp (read-only mode)
+        bypass:  allow everything
+        accept_edits: allow file writes (handled in check_write)
+        """
+        if self.mode == "plan" and kind in ("write", "command", "network", "mcp"):
+            return Decision("deny", "plan mode: read-only (no writes, commands, network or MCP)")
+        if self.mode == "bypass":
+            return Decision("allow", "bypass mode")
+        return None
+
     def check_command(self, command: str, cwd: Optional[Path] = None) -> Decision:
+        md = self._mode_decision("command")
+        if md:
+            return md
         cfg = self._cmd()
         scoped = self._scoped()
         redirects: list[str] = []
@@ -427,6 +446,9 @@ class ApprovalPolicy:
         return Decision("allow", "inside trusted paths" if by_scope else "all parts match allow rules")
 
     def check_network(self, host: str) -> Decision:
+        md = self._mode_decision("network")
+        if md:
+            return md
         cfg = self.data.get("network", {})
         host = host.lower()
         for g in cfg.get("deny", []):
@@ -442,6 +464,9 @@ class ApprovalPolicy:
         return self._default("network")
 
     def check_mcp(self, tool_name: str) -> Decision:
+        md = self._mode_decision("mcp")
+        if md:
+            return md
         cfg = self.data.get("mcp", {})
         for g in cfg.get("deny", []):
             if fnmatch.fnmatch(tool_name, g):
@@ -453,9 +478,29 @@ class ApprovalPolicy:
                 return Decision("allow", f"matches allow pattern '{g}'")
         return self._default("mcp")
 
+    SENSITIVE_READ = re.compile(
+        r"(\.env(\..+)?$|(^|/)\.ssh(/|$)|id_(rsa|ed25519|ecdsa)(\.pub)?$|\.pem$|\.key$|"
+        r"(^|/)secrets?(/|$)|(^|/)credentials(\.json)?$|\.netrc$|\.aws(/|$))",
+        re.I,
+    )
+
+    def check_read(self, rel_path: str) -> Decision:
+        """Sensitive files (secrets, keys) need approval even for reading."""
+        p = rel_path.replace("\\", "/")
+        if self.SENSITIVE_READ.search(p):
+            if self.data.get("auto_approve_all") or self.session_approve:
+                return Decision("allow", "session approve" if self.session_approve else "auto_approve_all")
+            return Decision("ask", "sensitive file (secrets/keys)")
+        return Decision("allow", "not sensitive")
+
     def check_write(self, rel_path: str) -> Decision:
+        md = self._mode_decision("write")
+        if md:
+            return md
         cfg = self.data.get("files", {})
         p = rel_path.replace("\\", "/")
+        if ".git" in p.split("/"):
+            return Decision("deny", "writing into .git is not allowed")
         abs_p: Optional[Path] = None
         names = [p]  # what the globs are matched against: as given + relative to its trusted root
         if self.root is not None:
@@ -480,6 +525,8 @@ class ApprovalPolicy:
                 return Decision("allow", f"matches allow pattern '{g}'")
         if self._scoped() and abs_p is not None and self._within(abs_p):
             return Decision("allow", "inside trusted paths")
+        if self.mode == "accept_edits" and abs_p is not None and self._within(abs_p):
+            return Decision("allow", "accept_edits mode")
         return self._default("files")
 
     # --------------------------------------------------------- persistence

@@ -97,6 +97,61 @@ def ask_user(ctx: ToolContext, a: dict) -> str:
     return f"The user {kind}: {str(resp['answer']).strip()}"
 
 
+def _plan_todos(markdown: str) -> list[dict]:
+    """Turn a plan's bullet/numbered lines into a todo checklist."""
+    out: list[dict] = []
+    for line in markdown.splitlines():
+        s = line.strip()
+        if s[:2] in ("- ", "* ") or (len(s) > 2 and s[0].isdigit() and s[1] in ".)"):
+            content = s.lstrip("-*0123456789. )").strip()
+            if content:
+                out.append({"content": content[:MAX_TODO_CHARS], "status": "pending"})
+        if len(out) >= MAX_TODOS:
+            break
+    return out
+
+
+def exit_plan_mode(ctx: ToolContext, a: dict) -> str:
+    """Plan mode: present the plan to the user; on approval switch to the full tool set."""
+    running = getattr(ctx, "agent", None)  # the running Agent (set by the Engine)
+    if running is None or not getattr(running, "plan_mode", False):
+        raise ToolError("not in plan mode - you already have the full tool set, just do the work")
+    plan = str(a.get("plan_markdown", "")).strip()
+    if not plan:
+        raise ToolError("plan_markdown is empty")
+    req = {
+        "header": "Plan approval",
+        "question": "Approve this plan and switch to execution mode?",
+        "options": [{"label": "Approve - start executing", "description": "the plan becomes your todo list"},
+                    {"label": "Reject - keep exploring", "description": "tell the model what to change"}],
+        "allow_freeform": True,
+    }
+    if ctx.ask_user is None:
+        raise ToolError("no user is available to approve the plan")
+    resp = ctx.ask_user(req)
+    approved = resp and not resp.get("dismissed") and "approve" in str(resp.get("answer", "")).lower()
+    if not approved:
+        extra = f" User feedback: {resp.get('answer', '')}" if resp and resp.get("answer") else ""
+        return f"The user did NOT approve the plan. Revise it and call exit_plan_mode again.{extra}"
+    todos = _plan_todos(plan)
+    if todos:
+        ctx.todos = todos
+        ctx.emit("todo_updated", {"todos": todos})
+    running.plan_mode = False
+    full = getattr(ctx, "engine", None)
+    full = getattr(full, "registry", None) if full is not None else None
+    if full is not None:
+        running.registry = full
+        running._tools = full.schemas()
+        known = getattr(running, "_known_tools", None)
+        if known is not None:
+            known.clear()
+            known.update(full.names())
+    ctx.emit("plan_approved", {"plan": plan})
+    return "Plan APPROVED. You now have the full tool set. Work through the plan (it is your todo list); " \
+           "update statuses as you go."
+
+
 def interact_tools() -> list[Tool]:
     return [
         Tool(
@@ -125,7 +180,7 @@ def interact_tools() -> list[Tool]:
                 "required": ["todos"],
             },
             func=update_todo,
-            kind="read",
+            kind="action",  # mutates the checklist: must run serially, in call order
         ),
         Tool(
             name="ask_user",
@@ -149,6 +204,24 @@ def interact_tools() -> list[Tool]:
                 "required": ["question"],
             },
             func=ask_user,
-            kind="read",
-        )
+            kind="action",  # blocks on the user: must never run in parallel
+        ),
+        Tool(
+            name="exit_plan_mode",
+            description=(
+                "PLAN MODE ONLY: you are exploring read-only. When you have a concrete plan, call this "
+                "with the full plan as markdown (bullet steps with the files to touch). The user must "
+                "approve it; on approval you get the full tool set and the plan becomes your todo list. "
+                "Do not call it until the plan is ready to execute."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "plan_markdown": {"type": "string", "description": "the plan as markdown; bullet/numbered steps become the todo list"},
+                },
+                "required": ["plan_markdown"],
+            },
+            func=exit_plan_mode,
+            kind="action",  # blocks on the user: must never run in parallel
+        ),
     ]

@@ -18,7 +18,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -27,8 +27,6 @@ from .tools.base import Tool, ToolContext, ToolError
 from .util import parse_front_matter
 
 IGNORED = {".git", "node_modules", ".venv", "venv", "__pycache__", ".agent", "build", "out", "third_party"}
-MEMORY_PROMPT_CHARS = 3000
-MEMORY_MAX_CHARS = 20000
 
 
 @dataclass
@@ -83,12 +81,19 @@ class Skill:
     body: str
     triggers: Optional[re.Pattern] = None  # when a failing command's output matches, the body is injected
     source: str = "project"  # builtin | user | project
+    tools: Optional[list[str]] = None  # when set, restrict the agent's tool set while this skill is active
+    effort: Optional[str] = None  # suggested thinking effort for work under this skill
+    globs: list[str] = field(default_factory=list)  # file globs the skill is most relevant to
 
     def shown_path(self, root: Path) -> str:
         try:
             return self.path.relative_to(Path(root).resolve()).as_posix()
         except ValueError:
             return str(self.path)  # outside the project: readable through read_file (see agent_read_roots)
+
+
+def _csv(v: str) -> list[str]:
+    return [x.strip() for x in v.split(",") if x.strip()]
 
 
 def load_skills(root: Path) -> dict[str, Skill]:
@@ -109,7 +114,12 @@ def load_skills(root: Path) -> dict[str, Skill]:
                 except re.error:
                     trig = None  # a bad pattern must not break the agent
             name = meta.get("name", f.parent.name)
-            skills[name] = Skill(name, meta.get("description", ""), f.resolve(), body.strip(), trig, source)
+            skills[name] = Skill(
+                name, meta.get("description", ""), f.resolve(), body.strip(), trig, source,
+                tools=_csv(meta["tools"]) if meta.get("tools") else None,
+                effort=meta.get("effort") or None,
+                globs=_csv(meta.get("globs", "")),
+            )
     return skills
 
 
@@ -121,6 +131,58 @@ def matching_skills(root: Path, text: str, exclude: Optional[set[str]] = None) -
     """Skills whose ``triggers`` pattern matches ``text`` (e.g. the output of a failed build)."""
     return [s for s in load_skills(root).values()
             if s.triggers and s.name not in (exclude or set()) and s.triggers.search(text)]
+
+
+def skill_by_name(root: Path, name: str) -> Optional[Skill]:
+    return load_skills(root).get(name)
+
+
+def use_skill_tool() -> Tool:
+    """Model-facing tool: load a skill's full body on demand (progressive disclosure).
+
+    The system prompt only lists name + description; the body is fetched here,
+    deduplicated per run (a second call in the same run returns a stub)."""
+    SKILL_MAX_CHARS = 6000
+
+    def use_skill(ctx: ToolContext, a: dict) -> str:
+        from .util import truncate_middle
+
+        name = a["name"]
+        if not hasattr(ctx, "used_skills"):
+            ctx.used_skills = set()
+        s = skill_by_name(ctx.root, name)
+        if s is None:
+            avail = ", ".join(sorted(load_skills(ctx.root)))
+            return f"No skill named '{name}'. Available skills: {avail}"
+        if name in ctx.used_skills:
+            return f"[skill '{name}' is already loaded in this run - follow it, do not re-load]"
+        ctx.used_skills.add(name)
+        notes = []
+        if s.tools:
+            notes.append(f"this skill suggests using only: {', '.join(s.tools)}")
+        if s.effort:
+            notes.append(f"suggested thinking effort: {s.effort}")
+        header = f"[skill '{name}' - {s.description}]"
+        if notes:
+            header += " (" + "; ".join(notes) + ")"
+        return header + "\n" + truncate_middle(s.body, a.get("max_chars") or SKILL_MAX_CHARS)
+
+    return Tool(
+        "use_skill",
+        "Load a skill's full instructions by name (the system prompt only lists name + description). "
+        "Use it when a listed skill matches the task at hand, BEFORE starting the work. "
+        "The same skill is not re-loaded twice in one run.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "skill name from the skills list"},
+                "max_chars": {"type": "integer", "description": "max body chars to return (default 6000)"},
+            },
+            "required": ["name"],
+        },
+        use_skill,
+        kind="read",
+    )
 
 
 # ---------------------------------------------------------- module docs
@@ -153,56 +215,41 @@ def module_index(root: Path, max_depth: int = 5, limit: int = 60) -> list[IndexE
 
 
 # ------------------------------------------------------------------- memory
-def _memory_paths(root: Path) -> dict[str, Path]:
-    return {
-        "project": project_cache_dir(root) / "memory.md",
-        "global": user_dir() / "memory" / "global.md",
-    }
+# Structured notes live in memory.py; this module keeps the prompt injection and
+# the model-facing tools. Each note is one md file (front-matter typed); only
+# the one-line index is injected, bodies are read on demand with memory_read.
+from . import memory as _memory  # noqa: E402  (local import: memory depends on tools.base)
 
 
 def load_memory(root: Path) -> str:
-    parts: list[str] = []
-    for scope, p in _memory_paths(root).items():
-        if p.is_file():
-            text = p.read_text(encoding="utf-8", errors="replace").strip()
-            if text:
-                parts.append(f"[{scope}]\n{text[-MEMORY_PROMPT_CHARS:]}")
-    return "\n\n".join(parts)
+    """The memory index (one line per note) for the system prompt."""
+    return _memory.memory_index(root)
 
 
 def append_memory(root: Path, note: str, scope: str = "project") -> Path:
-    paths = _memory_paths(root)
-    if scope not in paths:
-        raise ToolError("scope must be 'project' or 'global'")
-    note = " ".join(note.split())
-    if not note:
-        raise ToolError("empty note")
-    p = paths[scope]
-    p.parent.mkdir(parents=True, exist_ok=True)
-    old = p.read_text(encoding="utf-8") if p.is_file() else ""
-    if note in old:
-        return p
-    new = old + f"- {time.strftime('%Y-%m-%d')}: {note}\n"
-    p.write_text(new[-MEMORY_MAX_CHARS:], encoding="utf-8")
-    return p
+    return _memory.write_note(root, note, scope=scope).path
 
 
 def extract_memory(provider, root: Path, prompt: str, final_text: str,
                    cancel: Optional[threading.Event] = None) -> list[str]:
     """Ask the model (thinking off, small budget) for durable facts from this turn.
 
-    Returns the notes that were actually saved (empty when nothing is worth
-    keeping). Never raises: extraction is best-effort and must not break the turn.
+    Only facts that are long-term useful AND not derivable from the code itself
+    qualify. Returns the notes that were actually saved (empty when nothing is
+    worth keeping). Never raises: extraction is best-effort and must not break
+    the turn.
     """
     try:
         transcript = (f"User asked: {prompt[:1500]}\n\nAgent's final answer: {final_text[:3000]}")
         reply = provider.complete(
             [
                 {"role": "system", "content":
-                    "You review a finished coding-agent turn and extract durable facts for future sessions: "
-                    "build/test commands, project conventions, environment quirks, pitfalls discovered. "
+                    "You review a finished coding-agent turn and extract durable facts for future sessions. "
+                    "Only save facts that are (a) long-term useful AND (b) NOT derivable from the code itself: "
+                    "build/test commands, project conventions, environment quirks, pitfalls discovered, user preferences. "
+                    "Never save: file contents, line numbers, temporary state, anything grep/read_file can find again. "
                     "Reply with a JSON array of short strings (one sentence each, max 3). "
-                    "If nothing is worth remembering, reply []."},
+                    "If nothing qualifies, reply []."},
                 {"role": "user", "content": transcript},
             ],
             cancel=cancel, thinking=False, max_tokens=300,
@@ -220,22 +267,92 @@ def extract_memory(provider, root: Path, prompt: str, final_text: str,
 
 def memory_tools() -> list[Tool]:
     def remember(ctx: ToolContext, a: dict) -> str:
-        p = append_memory(ctx.root, a["note"], a.get("scope", "project"))
-        return f"Saved to {p}"
+        n = _memory.write_note(ctx.root, a["note"], scope=a.get("scope", "project"))
+        return f"Saved memory '{n.name}' ({n.type}) to {n.path}"
 
+    def memory_read(ctx: ToolContext, a: dict) -> str:
+        n = _memory.find_note(ctx.root, a["name"])
+        if n is None:
+            return f"No memory named '{a['name']}'. Use memory_search to find it."
+        return f"[memory '{n.name}' ({n.type}, updated {n.updated})]\n{n.body}"
+
+    def memory_delete(ctx: ToolContext, a: dict) -> str:
+        if _memory.delete_note(ctx.root, a["name"]):
+            return f"Deleted memory '{a['name']}'."
+        return f"No memory named '{a['name']}'."
+
+    def memory_search(ctx: ToolContext, a: dict) -> str:
+        hits = _memory.search_notes(ctx.root, a["query"], limit=a.get("limit", 10))
+        if not hits:
+            return f"No memories match '{a['query']}'."
+        return "\n".join(f"- [{n.type}] {n.name}: {n.description}" for n in hits)
+
+    scope = {"type": "string", "enum": ["project", "global"],
+             "description": "'project' = this repo only, 'global' = all projects"}
     return [
         Tool(
             "remember",
             "Save a short, durable fact for future sessions (build commands, conventions, pitfalls). "
-            "scope 'project' = this repo only, 'global' = all projects. One sentence per note.",
+            "One sentence per note; saving the same fact again updates it instead of duplicating.",
             {
                 "type": "object",
-                "properties": {
-                    "note": {"type": "string"},
-                    "scope": {"type": "string", "enum": ["project", "global"]},
-                },
+                "properties": {"note": {"type": "string"}, "scope": scope},
                 "required": ["note"],
             },
             remember,
-        )
+            kind="action",  # writes a memory file: must run serially, in call order
+        ),
+        Tool(
+            "memory_write",
+            "Create or update a named memory note (upsert). Use it to revise an existing note "
+            "(same name) instead of adding a duplicate. type: user (user preferences) | feedback "
+            "(corrections given by the user) | project (repo facts) | reference (external pointers).",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "short hyphenated note name, e.g. build-command"},
+                    "note": {"type": "string", "description": "the full note text"},
+                    "description": {"type": "string", "description": "one-line summary shown in the index"},
+                    "type": {"type": "string", "enum": list(_memory.MEMORY_TYPES)},
+                    "scope": scope,
+                },
+                "required": ["name", "note"],
+            },
+            lambda ctx, a: f"Saved memory '{_memory.write_note(ctx.root, a['note'], scope=a.get('scope', 'project'), name=a['name'], description=a.get('description', ''), type=a.get('type', '')).name}'",
+            kind="action",
+        ),
+        Tool(
+            "memory_read",
+            "Read the full text of a memory note by name (the system prompt only shows the index).",
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            memory_read,
+        ),
+        Tool(
+            "memory_delete",
+            "Delete a memory note by name.",
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            memory_delete,
+            kind="action",
+        ),
+        Tool(
+            "memory_search",
+            "Keyword-search all memory notes (name, description, body). Returns matching index lines.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "description": "max results, default 10"},
+                },
+                "required": ["query"],
+            },
+            memory_search,
+        ),
     ]

@@ -46,6 +46,7 @@ class Turn:
     final_text: str = ""
     subtasks: list[dict] = field(default_factory=list)  # plan turns: id/title/status/summary
     created: float = field(default_factory=time.time)
+    usage: dict = field(default_factory=dict)  # {prompt, completion, steps, ttft_avg_s, tool_s, wall_s}
 
     def display_messages(self) -> list[dict]:
         return self.archive + self.messages

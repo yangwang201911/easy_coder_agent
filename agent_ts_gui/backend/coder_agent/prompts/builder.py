@@ -85,7 +85,10 @@ class PromptBuilder:
         if s.memory:
             mem = knowledge.load_memory(self.root)
             if mem:
-                parts.append("# Notes from earlier sessions\n" + mem)
+                parts.append(
+                    "# Notes from earlier sessions (index only - use memory_read to read a note, "
+                    "memory_search to find one, memory_write/remember to add or update)\n" + mem
+                )
         if extra:
             parts.append(extra)
         if s.environment:
