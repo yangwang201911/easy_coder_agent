@@ -2,7 +2,7 @@
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 const path = require("path");
 
-const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, ".."), onLog: (d) => process.stderr.write(`[app] ${d}`) });
+const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", ".."), onLog: (d) => process.stderr.write(`[app] ${d}`) });
 
 let failed = false;
 function check(name, cond) {

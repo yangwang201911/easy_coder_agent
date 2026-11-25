@@ -33,7 +33,7 @@ exit /b 0
 
 :run_gui
 echo === gui: %1 ===
-pushd gui
+pushd gui\tests\e2e
 call node run_all_tests.cjs %1
 if errorlevel 1 set FAILED=%FAILED% %1
 popd

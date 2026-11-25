@@ -12,7 +12,7 @@ function compile(source) {
 }
 
 test("backend readiness accepts POSIX LF and Windows CRLF stdout", () => {
-  const source = fs.readFileSync(path.join(__dirname, "src/main/backend-output.ts"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "src/main/backend-output.ts"), "utf8");
   const context = { exports: {} };
   vm.runInNewContext(compile(source), context);
   const parse = context.exports.backendUrlFromLine;
@@ -26,7 +26,7 @@ test("backend readiness accepts POSIX LF and Windows CRLF stdout", () => {
 
 // Exercise the actual renderer RPC section without needing an Electron window.
 function rpcClient(send, getBackendUrl = async () => "ws://127.0.0.1:8931") {
-  const source = fs.readFileSync(path.join(__dirname, "src/renderer/app.ts"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "src/renderer/app.ts"), "utf8");
   const start = source.indexOf("let nextId = 0;");
   const end = source.indexOf("// ------------------------------------------------------------------- status", start);
   assert.ok(start >= 0 && end > start);

@@ -12,7 +12,7 @@ const { buildSync } = require("esbuild");
 const outDir = fs.mkdtempSync(path.join(__dirname, ".ssh-tunnel-test-"));
 process.on("exit", () => fs.rmSync(outDir, { recursive: true, force: true }));
 const out = path.join(outDir, "ssh-tunnel.cjs");
-buildSync({ entryPoints: [path.join(__dirname, "src/main/ssh-tunnel.ts")], bundle: true, platform: "node",
+buildSync({ entryPoints: [path.join(__dirname, "..", "..", "src/main/ssh-tunnel.ts")], bundle: true, platform: "node",
   format: "cjs", external: ["ssh2"], outfile: out, logLevel: "error" });
 const { openTunnel, parseSshTarget, SshInteractionRequired } = require(out);
 

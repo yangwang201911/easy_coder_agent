@@ -152,9 +152,9 @@ EOF
 sed -i "s/__SERVER_BIN__/coder-agent-server-${VER}.linux/" "$OUTDIR/coder-agent-server.sh"
 chmod +x "$OUTDIR/coder-agent-server-${VER}.linux" "$OUTDIR/coder-agent-server.sh"
 # systemd unit for running the server as a service on the Linux target machine
-cp coder-agent-server.service "$OUTDIR/coder-agent-server.service"
+cp deploy/coder-agent-server.service "$OUTDIR/coder-agent-server.service"
 # usage guide for the end user
-cp guide_release.txt "$OUTDIR/guide.txt"
+cp docs/release-guide.md "$OUTDIR/guide.txt"
 
 echo "==> done, artifacts in release/"
 ls -l "$OUTDIR"

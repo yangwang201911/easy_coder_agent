@@ -10,7 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const GUI = __dirname;
-const BACKEND = path.join(__dirname, "..", "backend");
+const BACKEND = path.join(__dirname, "..", "..", "..", "backend");
 const REMOTE_PORT = 8931;
 const IS_WIN = process.platform === "win32";
 const VENV_PY = path.join(BACKEND, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
@@ -99,7 +99,7 @@ function runOne(name, extraEnv = {}) {
   // Always build first: the tests run `electron .` against dist/, which is a
   // build artifact. A stale dist would make the suite test old code.
   console.log("[runner] building (esbuild) ...");
-  const b = spawnSync("node", ["build.mjs"], { cwd: GUI, stdio: "inherit" });
+  const b = spawnSync("node", ["build.mjs"], { cwd: path.join(GUI, "..", ".."), stdio: "inherit" });
   if (b.status !== 0) { console.error("[runner] build failed"); process.exit(1); }
 
   for (const name of names) {

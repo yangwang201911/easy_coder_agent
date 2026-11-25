@@ -9,7 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..");
+const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", "..");
 // the port the test server listens on: the runner sets CDP_REMOTE_PORT when it
 // starts a dedicated server (8931 may be the developer's own running server,
 // which the test must never kill)
@@ -120,7 +120,7 @@ function check(label, ok) {
     // 5) auto-reconnect: kill the remote server, the GUI must show the banner
     // and keep trying; restart the server and the GUI must reconnect on its own
     const { spawn, execSync } = require("child_process");
-    const BACKEND = path.join(__dirname, "..", "backend");
+    const BACKEND = path.join(__dirname, "..", "..", "..", "backend");
     const srvLog = path.join(os.tmpdir(), "cdp-remote-restart.log");
     const startSrv = () => {
       const out = fs.openSync(srvLog, "a");

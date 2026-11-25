@@ -2,7 +2,7 @@
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 const path = require("path");
 
-const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, "..") });
+const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", "..") });
 
 const t0 = Date.now();
 const ts = (label) => console.log(`t=${Date.now() - t0}ms  ${label}`);

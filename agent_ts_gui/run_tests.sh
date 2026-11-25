@@ -25,8 +25,8 @@ run_backend() {
   fi
 }
 
-run_gui() { # $1... = suite names (see gui/run_all_tests.cjs for the list)
-  if ! (cd gui && node run_all_tests.cjs "$@"); then
+run_gui() { # $1... = suite names (see gui/tests/e2e/run_all_tests.cjs for the list)
+  if ! (cd gui/tests/e2e && node run_all_tests.cjs "$@"); then
     failed+=("gui:$*")
   fi
 }

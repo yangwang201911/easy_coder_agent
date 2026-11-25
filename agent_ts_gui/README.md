@@ -19,6 +19,7 @@ agent_ts_gui/
     src/main/         #   main process: window + Python backend subprocess + IPC
     src/preload/      #   type-safe bridge to the renderer
     src/renderer/     #   the UI (HTML/CSS/JS, styled to match the old PySide6 look)
+    tests/e2e/        #   CDP smoke tests (cdp_*_test.cjs + run_all_tests.cjs)
   start_gui.sh
   release.sh            # Linux AppImage build (PyInstaller backend + electron-builder)
   release.bat           # Windows NSIS build (run on Windows)
@@ -147,7 +148,7 @@ run_tests.bat
 
 Individual targets: `backend`, `gui`, `remote` (needs a standalone server on
 `127.0.0.1:8931`), or a single GUI test name (`boot`, `theme`, `split`, ...).
-`cd gui && node run_all_tests.cjs [names...]` runs the CDP suite directly
+`cd gui/tests/e2e && node run_all_tests.cjs [names...]` runs the CDP suite directly
 (starts the remote server itself for the `remote` test).
 
 ## Status (phased build)

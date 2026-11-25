@@ -64,7 +64,7 @@ function spawnApp(opts = {}) {
   ];
   if (opts.root) args.push("--root", opts.root);
   const proc = spawn(electron, args, {
-    cwd: __dirname,
+    cwd: path.join(__dirname, "..", ".."),
     env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     // POSIX: own process group so kill(-pid) reaches the whole tree.
@@ -202,7 +202,7 @@ function connectCdp(wsUrl) {
 
 // The backend venv python (cross-platform: .venv/Scripts on Windows).
 function venvPython() {
-  const B = path.join(__dirname, "..", "backend");
+  const B = path.join(__dirname, "..", "..", "..", "backend");
   return path.join(B, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
 }
 

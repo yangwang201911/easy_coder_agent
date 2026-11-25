@@ -16,7 +16,7 @@ backend/build_standalone.py   # PyInstaller one-file build of the backend
 backend/_standalone_entry.py  # dedicated entry (server.py uses relative imports,
                               #   so it CANNOT be the PyInstaller entry script)
 gui/package.json "build"      # electron-builder config, output dir = ../release
-guide_release.txt             # end-user guide, copied to release/guide.txt
+docs/release-guide.md       # end-user guide, copied to release/guide.txt
 release/                  # all artifacts (gitignored)
 ```
 
