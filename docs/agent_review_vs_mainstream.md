@@ -63,7 +63,7 @@
 | 5.10 | 代码检索 | 缺失 | 仅 rg/正则，无符号/LSP/语义 | P2 | 🟡 grep 增强 + `code_symbols` 已做；缺 LSP/语义 |
 | 5.14 | MCP | 中 | 仅 stdio 工具；无 resources/prompts/HTTP/OAuth | P2 | ✅ stdio+HTTP/SSE、resources/prompts、readOnlyHint、延迟加载、状态可见 |
 | 5.16 | hooks/可观测性 | 缺失 | 无 hooks、无用量与成本统计 | P2 | ✅ hooks（`.agent/hooks.toml`）+ 每 turn 用量统计（GUI 展示） |
-| 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 | 🟡 新后端 98 测试通过；旧 `agent/` 目录仍并存待归档 |
+| 5.17 | 测试 | 中 | 两套测试目录；关键新能力缺少测试 | P1 | 🟡 新后端 148 测试通过；旧 `agent/` 目录仍并存待归档 |
 
 ---
 
@@ -507,13 +507,15 @@ gantt
 | 2026-11-24 | `770b17f` | 5.4 memory：结构化 typed notes、索引注入、`memory_write/read/delete/search`、旧格式迁移 |
 | 2026-11-24 | `d8182b9` | 5.5 skills：`use_skill` 工具 + 斜杠 `/skill` 调用 + front-matter `tools/effort` + 5 个内置 skill |
 | 2026-11-24 | `0c792ea` | 5.11 `move_path/delete_path/make_dir`（kind=write，进入快照，rewind 可撤销） |
-| 2026-11-24 | — | 5.1 `probe_effort` 启动探测合法 effort 值，`context_info` 返回 `efforts`，GUI 只展示合法值并自动回退非法选择 |
+| 2026-11-24 | `a0e9da7` | 5.1 `probe_effort` 启动探测合法 effort 值，`context_info` 返回 `efforts`，GUI 只展示合法值并自动回退非法选择 |
 | 2026-11-24 | `70ea628` | 5.3 `/compact`：`Engine.compact()` 手动压缩 + `compact` RPC + GUI `/compact` 斜杠命令（显示 before→after token） |
 | 2026-11-24 | `ff2d10c` | 5.15 权限模式：`ApprovalPolicy.mode`（default/accept_edits/plan/bypass）+ `set_mode`/`get_mode` RPC + GUI 模式菜单 |
 | 2026-11-24 | `ade1502` | 5.7 `spawn_agent`：explore（只读工具）/ general（全工具+步数上限）子 Agent，独立上下文，防递归，4 个回归测试 |
 | 2026-11-24 | `aa20510` | 5.6 计划模式：`/plan` 只读探索 → `exit_plan_mode` 用户审批（计划→todo）→ 中途切换全工具集，2 个回归测试 |
 | 2026-11-24 | `4d48fd6` | 5.11 `edit_file` 原子多处编辑：全部匹配才写盘，任一失败零改动，6 个回归测试 |
 | 2026-11-24 | `8241f44` | 5.13 `web_search` allowed/blocked_domains（后缀匹配）+ `browser_wait_for(text|ref|state)`，7 个回归测试 |
+| 2026-11-25 | `d3adc8d` | 5.16 hooks（`.agent/hooks.toml`：pre/post_tool、pre_compact、turn_end、session_start，退出码 2 拦截）+ 每 turn 用量统计（token/TTFT/工具耗时/wall，`Turn.usage` 持久化，GUI 展示），7 个回归测试 |
+| 2026-11-25 | `aa06dc1` | 5.14 MCP：Streamable HTTP/SSE 传输 + `headers` `${ENV}` 展开、resources/prompts 工具、`readOnlyHint`→read kind、>20 工具延迟加载（`mcp_search`/`mcp_call`）、`mcp_status` RPC + GUI 状态显示，7 个回归测试 |
 
 ---
 
