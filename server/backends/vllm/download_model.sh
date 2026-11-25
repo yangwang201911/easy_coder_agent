@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-source "$SCRIPT_DIR/vllm-env/bin/activate"
+source "$SCRIPT_DIR/../../vllm-env/bin/activate"
 
 # dependcy
 # pip install openvino-tokenizers openvino nncf optimum[intel]

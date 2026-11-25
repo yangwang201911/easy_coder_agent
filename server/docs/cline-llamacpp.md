@@ -64,7 +64,7 @@ manage_ovms.sh stop
 
 ```
 API Provider: OpenAI Compatible
-Base URL: http://10.239.133.43:8000/v3
+Base URL: http://<YOUR_SERVER_IP>:8000/v3
 API Key: ovms（随便填）
 Model ID: qwen3.8-27b
 ```

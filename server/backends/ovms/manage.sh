@@ -2,16 +2,18 @@
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
+. "$SCRIPT_DIR/../../common/utils.sh"
+
 # ==================== 用户配置区 ====================
 # 1. 本地 OpenVINO IR 模型目录（Qwen3.5 VLM, int4）
-MODEL_DIR="${SCRIPT_DIR}/../OpenVINO/Qwen3.8-27B-int4-ov"
+MODEL_DIR="${SCRIPT_DIR}/../../OpenVINO/Qwen3.8-27B-int4-ov"
 
 # 2. 对外暴露的模型名（Cline 里填的 Model ID）
 SERVED_MODEL_NAME="qwen3.8-27b"
 
 # 3. 服务地址与端口
 # ServerIP 仅用于拼接客户端访问地址；BIND_ADDR 是 docker 端口发布绑定的本机地址
-ServerIP="10.239.216.35"
+ServerIP="$(get_host_ip)"
 BIND_ADDR="0.0.0.0"
 PORT="8000"
 
@@ -35,7 +37,6 @@ CACHE_SIZE=8                # KV cache 大小(GB)，0 = 动态分配
 KV_CACHE_PRECISION=""
 ENABLE_PREFIX_CACHING="true"
 PIPELINE_TYPE="AUTO"        # LM / LM_CB / VLM / VLM_CB / AUTO
-PIPELINE_TYPE="VLM_CB"
 REASONING_PARSER="qwen3"    # 支持: qwen3 gemma4 gptoss minicpm5 lfm2
 TOOL_PARSER="qwen3coder"    # 本模型 chat_template 为 <tool_call><function=..> XML 格式
 
@@ -49,10 +50,10 @@ ENABLE_THINKING="true"
 REASONING_EFFORT=""
 
 # 运行时生成文件目录（存放 patch 后的 chat template）
-RUNTIME_DIR="${SCRIPT_DIR}/../ovms_runtime"
+RUNTIME_DIR="${SCRIPT_DIR}/ovms_runtime"
 
 # 7. 编译缓存（GPU 首次编译 27B 极慢，缓存后重启显著加速）
-OV_CACHE_DIR="${SCRIPT_DIR}/../ovms_cache"
+OV_CACHE_DIR="${SCRIPT_DIR}/ovms_cache"
 
 # 8. 日志
 LOG_FILE="${SCRIPT_DIR}/ovms_server.log"

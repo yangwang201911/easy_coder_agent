@@ -1,0 +1,20 @@
+# VL 版（参考 Modelfile）: smtek/Swift-Qwen3.8-27B:map-k4v + F16 mmproj(视觉投影器)
+# 注: Ollama 0.32.15 不认识 draft_ngram_map_k4v_* 参数, 故未保留 MTP/ngram-map 加速。
+# ★ 实际构建请用 make_vl_tag.sh（直接写 manifest, 自动算 sha256）; 本文件仅作参考。
+# 若手动用本文件, 请把下面两个 <SERVER> 替换为本机 server/ 目录的绝对路径:
+#   ollama create smtek/Swift-Qwen3.8-27B:map-k4v-vl -f <本文件>
+FROM <SERVER>/backends/ollama/models/blobs/sha256-ad5811e291431bd0de1cec0c4004a5eac98daee9850882edac69a823209e88ab
+TEMPLATE {{ .Prompt }}
+PARAMETER num_gpu 999
+PARAMETER stop 
+PARAMETER stop </tool_call>
+PARAMETER min_p 0
+PARAMETER num_batch 512
+PARAMETER num_predict -1
+PARAMETER temperature 0.6
+PARAMETER top_k 20
+PARAMETER top_p 0.95
+PARAMETER num_ctx 143360
+PARAMETER presence_penalty 0
+PARAMETER repeat_penalty 1
+PARAMETER mmproj <SERVER>/backends/ollama/vl/mmproj-Qwen3.8-27B-F16.gguf

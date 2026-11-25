@@ -2,7 +2,7 @@
 
 SCRIPT_DIR_TEST_OPENAI_CLIENT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
-SERVER_IP=10.239.216.35
+SERVER_IP="<YOUR_SERVER_IP>"
 
 no_proxy=$no_proxy,${SERVER_IP}
 NO_PROXY=$NO_PROXY,${SERVER_IP}
