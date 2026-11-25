@@ -4,7 +4,7 @@ source vllm-env/bin/activate
 # --effort: "none", "low", "medium", "high"
 
 my_prompt="请用 100 字左右解释一下什么是张量并行。"
-my_prompt="""/mnt/data_nvme1n1p1/xiping_workpath/my_coder_agent/tmp
+my_prompt="""/tmp
 
 帮我在这个位置写一个cpp的hello world的程序，使用cmake组织工程。
 """
@@ -110,7 +110,7 @@ get_host_ip() {
 }
 
 SERVER_IP=$(get_host_ip)
-# SERVER_IP=10.112.106.102
+# SERVER_IP=<YOUR_SERVER_IP>
 
 export NO_PROXY=$NO_PROXY,${SERVER_IP}
 export no_proxy=$NO_PROXY,${SERVER_IP}

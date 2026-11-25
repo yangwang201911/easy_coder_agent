@@ -1,11 +1,12 @@
 #!/bin/bash
 
 SCRIPT_DIR_START_VLLM="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-source "${SCRIPT_DIR_START_VLLM}/vllm-env/bin/activate"
+source "${SCRIPT_DIR_START_VLLM}/../../vllm-env/bin/activate"
+. "${SCRIPT_DIR_START_VLLM}/../../common/utils.sh"
 
 # ==================== 用户配置区 ====================
 # 1. 指向本地解压/下载好的模型绝对路径
-MODEL_PATH="${SCRIPT_DIR_START_VLLM}/Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+MODEL_PATH="${SCRIPT_DIR_START_VLLM}/../../Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
 
 # 2. 指定使用的 GPU (确认 3090 的编号)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -15,7 +16,7 @@ export CUDA_VISIBLE_DEVICES=1  # 替换为你的 3090 实际 GPU ID
 
 # 3. 服务运行端口与服务别名
 PORT=8000
-ServerIP=10.112.106.102
+ServerIP="$(get_host_ip)"
 SERVED_MODEL_NAME="qwen-coder-32b"
 
 # 4. 日志与 PID 文件路径（修正：绑定到脚本所在目录）

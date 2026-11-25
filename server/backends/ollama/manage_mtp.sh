@@ -3,17 +3,22 @@
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 # ==================== 用户配置区 ====================
-# MODEL_PATH="${SCRIPT_DIR}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf"
-MODEL_PATH="${SCRIPT_DIR}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf"
-SERVED_MODEL_NAME="qwen3.8-27b"
+# 自包含模型库（manifest + blobs），整个目录拷到其它机器即可使用
+export OLLAMA_MODELS="${SCRIPT_DIR}/models"
+SERVED_MODEL_NAME="smtek/Swift-Qwen3.8-27B:map-k4v"
 
-# 上下文长度（改这个值会触发重新导入）
-NUM_CTX="131072"
+# 上下文长度：留空则使用模型自带的 num_ctx(143360)；设置后仅在预热请求中覆盖
+# 注意：客户端请求的 num_ctx 与预热不一致会触发模型重新加载
+NUM_CTX=""
+
+# 自定义（打过补丁的）Ollama 可执行文件；stock Ollama 不会转发 draft_* 参数，MTP 不生效
+OLLAMA_BIN="${OLLAMA_BIN:-ollama}"
 
 # 思考模式开关 (true: 开启思考, false: 关闭思考)
 ENABLE_THINKING="false"
 
 export OLLAMA_FLASH_ATTENTION=true
+export OLLAMA_KV_CACHE_TYPE="q8_0"
 
 # 临时路径配置
 export LOCAL_TMP=${SCRIPT_DIR}/tmp
@@ -31,11 +36,32 @@ else
     unset LLAMA_ARG_THINK
 fi
 
-# --- 设置显卡与 Vulkan 禁用 ---
-export CUDA_VISIBLE_DEVICES=0
-# export OLLAMA_VULKAN=false
+# --- GPU 选择 ---
+# 用法: $0 start [gpu_id]，或 GPU_ID=1 $0 start；默认 0（编号与 nvidia-smi 一致）
+GPU_ID="${2:-${GPU_ID:-0}}"
+if ! [[ "$GPU_ID" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "[!] 无效的 GPU id: $GPU_ID"
+    exit 1
+fi
+# 默认 CUDA 按“性能最快优先”排序，编号会与 nvidia-smi 不一致，
+# 导致设置 1 实际选到另一张卡；强制按 PCI 总线顺序与 nvidia-smi 对齐
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES="$GPU_ID"
+# Ollama 0.32 默认同时启用 Vulkan 后端，Vulkan 不读取 CUDA_VISIBLE_DEVICES，
+# 会把所有显卡都暴露出来并可能选中 V100；关闭后只用 CUDA 后端
+export OLLAMA_VULKAN=false
 
-# 服务地址配置
+# 根据 GPU id 获取显卡名称（用于显示）
+get_gpu_names() {
+    local id names="" n
+    for id in ${GPU_ID//,/ }; do
+        n=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$id" 2>/dev/null | head -n1)
+        names+="${names:+, }${n:-未知}"
+    done
+    printf '%s\n' "$names"
+}
+GPU_NAME="$(get_gpu_names)"
+
 # ==================== 本机 IP 自动探测 ====================
 # 手动覆盖（可选）：执行前 export OLLAMA_BIND_IP="192.168.1.25"
 # 指定优先网卡（可选）：执行前 export OLLAMA_PREFER_IFACE="eth0"
@@ -104,10 +130,8 @@ PORT="8000"
 export OLLAMA_HOST="${ServerIP}:${PORT}"
 export OLLAMA_KEEP_ALIVE="-1"
 
-LOG_FILE="${SCRIPT_DIR}/ollama_server.log"
-PID_FILE="${SCRIPT_DIR}/ollama_server.pid"
-MODELFILE_PATH="${SCRIPT_DIR}/Modelfile"
-MODEL_FINGERPRINT_CACHE="${SCRIPT_DIR}/.ollama_model_fingerprint"
+LOG_FILE="${SCRIPT_DIR}/ollama_server_mtp.log"
+PID_FILE="${SCRIPT_DIR}/ollama_server_mtp.pid"
 # ====================================================
 
 # 精准校验服务进程
@@ -137,89 +161,35 @@ wait_for_server() {
     return 1
 }
 
-# 判断模型是否已在 Ollama 仓库中（通过官方 CLI，跨版本/跨 OLLAMA_MODELS 稳定）
+# 判断模型是否已在本地模型库中
 model_exists_in_ollama() {
-    local target="$SERVED_MODEL_NAME"
-    case "$target" in
-        *:*) ;;
-        *)   target="${target}:latest" ;;
-    esac
-    ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$target"
-}
-
-# 计算"快速指纹"：不读整个 20 GB，只读头尾 1 MB
-# 组合：大小 + mtime + inode + 头尾 sha256 + 模型名 + num_ctx
-# 换量化 / 换文件 / 改 num_ctx / 改模型名 都会让指纹变化
-compute_model_fingerprint() {
-    local f="$MODEL_PATH"
-    [ -f "$f" ] || { echo "MISSING"; return 1; }
-
-    local size mtime ino head_sha tail_sha tail_start
-    size=$(stat -c '%s' "$f" 2>/dev/null) || return 1
-    mtime=$(stat -c '%Y' "$f" 2>/dev/null) || return 1
-    ino=$(stat -c '%i' "$f" 2>/dev/null) || return 1
-
-    head_sha=$(head -c 1048576 "$f" 2>/dev/null | sha256sum | awk '{print $1}')
-    tail_start=$(( size > 1048576 ? size - 1048576 : 0 ))
-    tail_sha=$(tail -c +$((tail_start + 1)) "$f" 2>/dev/null | sha256sum | awk '{print $1}')
-
-    printf '%s|%s|%s|%s|%s|%s|%s\n' \
-        "$size" "$mtime" "$ino" "$head_sha" "$tail_sha" \
-        "$SERVED_MODEL_NAME" "$NUM_CTX"
-}
-
-# 判断缓存是否仍然有效
-model_cache_valid() {
-    # 1) Ollama 仓库里必须有这个模型
-    model_exists_in_ollama || return 1
-
-    # 2) 指纹缓存文件必须存在
-    [ -f "$MODEL_FINGERPRINT_CACHE" ] || return 1
-
-    # 3) 当前指纹必须与缓存一致
-    local current cached
-    current=$(compute_model_fingerprint) || return 1
-    cached=$(cat "$MODEL_FINGERPRINT_CACHE" 2>/dev/null)
-    [ -n "$cached" ] && [ "$current" = "$cached" ]
-}
-
-save_model_fingerprint() {
-    compute_model_fingerprint > "$MODEL_FINGERPRINT_CACHE"
-}
-
-check_and_import_model() {
-    if [ ! -f "$MODEL_PATH" ]; then
-        echo "[!] 错误：GGUF 模型文件不存在，请检查路径: $MODEL_PATH"
-        exit 1
-    fi
-
-    echo "[+] 正在针对当前 GGUF 文件生成 Modelfile (num_ctx ${NUM_CTX}) 并导入..."
-    cat << EOF > "$MODELFILE_PATH"
-FROM ${MODEL_PATH}
-PARAMETER num_ctx ${NUM_CTX}
-EOF
-
-    ollama create "$SERVED_MODEL_NAME" -f "$MODELFILE_PATH"
-    if [ $? -eq 0 ]; then
-        echo "[✓] 模型 ${SERVED_MODEL_NAME} 导入/更新成功！"
-    else
-        echo "[!] 模型导入失败，详细信息请查看日志: cat $LOG_FILE"
-        exit 1
-    fi
+    "$OLLAMA_BIN" list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$SERVED_MODEL_NAME"
 }
 
 warmup_model() {
     echo "[+] 正在发送 API 请求将模型预加载至 GPU 显存..."
+    local options=""
+    [ -n "$NUM_CTX" ] && options=", \"options\": {\"num_ctx\": ${NUM_CTX}}"
     curl -s "http://${OLLAMA_HOST}/api/generate" -d "{
       \"model\": \"${SERVED_MODEL_NAME}\",
       \"prompt\": \"warmup\",
-      \"keep_alive\": -1
+      \"keep_alive\": -1${options}
     }" > /dev/null
 
     if [ $? -eq 0 ]; then
         echo "[✓] 模型已成功预热并常驻显存！"
     else
         echo "[!] 预热请求发送失败，请检查服务状态。"
+    fi
+}
+
+# 检查日志中 llama-server 是否带有投机解码参数，用于确认 MTP 是否生效
+show_mtp_state() {
+    if grep -qiE 'draft-mtp|spec-type|--draft|ngram' "$LOG_FILE" 2>/dev/null; then
+        echo "[✓] 日志中检测到投机解码(MTP/ngram)相关参数："
+        grep -iE 'draft-mtp|spec-type|--draft|ngram' "$LOG_FILE" | tail -n 3 | cut -c1-300
+    else
+        echo "[!] 日志中未发现投机解码参数：当前 Ollama 可能不支持 draft_* 转发，MTP 未生效（需要补丁版 Ollama，设置 OLLAMA_BIN）。"
     fi
 }
 
@@ -231,28 +201,27 @@ case "$1" in
         fi
 
         if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || netstat -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-            echo "[!] 端口 $PORT 已被占用，请先排查占用端口的进程。"
+            echo "[!] 端口 $PORT 已被占用，请先排查占用端口的进程（例如旧的 manage_ollma.sh 服务）。"
             exit 1
         fi
 
-        # 思考模式控制环境变量 (底层 llama-server 推理核心层)
-        if [ "$ENABLE_THINKING" = "false" ]; then
-            echo "[+] 思考模式 : 关闭 (LLAMA_ARG_REASONING=off, LLAMA_ARG_THINK_BUDGET=0)"
-            export LLAMA_ARG_REASONING="off"
-            export LLAMA_ARG_THINK_BUDGET="0"
-            export LLAMA_ARG_THINK="none"
-        else
-            echo "[+] 思考模式 : 开启 (LLAMA_ARG_REASONING=auto)"
-            unset LLAMA_ARG_REASONING
-            unset LLAMA_ARG_THINK_BUDGET
-            unset LLAMA_ARG_THINK
+        if [ ! -d "$OLLAMA_MODELS/manifests" ]; then
+            echo "[!] 错误：模型库不存在: $OLLAMA_MODELS"
+            exit 1
         fi
 
-        echo "[+] 正在启动 Ollama 服务 (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES})..."
+        if [ "$ENABLE_THINKING" = "false" ]; then
+            echo "[+] 思考模式 : 关闭 (LLAMA_ARG_REASONING=off, LLAMA_ARG_THINK_BUDGET=0)"
+        else
+            echo "[+] 思考模式 : 开启"
+        fi
+
+        echo "[+] 正在启动 Ollama 服务 (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, 设备: ${GPU_NAME})..."
+        echo "[+] 模型库: $OLLAMA_MODELS"
         echo "[+] 服务地址: http://$OLLAMA_HOST"
         echo "[+] 日志输出: $LOG_FILE"
 
-        nohup ollama serve > "$LOG_FILE" 2>&1 &
+        nohup "$OLLAMA_BIN" serve > "$LOG_FILE" 2>&1 &
         PID=$!
         echo $PID > "$PID_FILE"
 
@@ -261,16 +230,14 @@ case "$1" in
             exit 1
         fi
 
-        # 缓存命中：模型已存在且文件/参数未变 -> 跳过 GGUF 导入
-        if model_cache_valid; then
-            echo "[✓] 模型 ${SERVED_MODEL_NAME} 指纹未变且已存在，跳过导入（缓存命中）。"
-        else
-            echo "[+] 模型文件或参数有变化，重新执行 ollama create ..."
-            check_and_import_model
-            save_model_fingerprint
+        if ! model_exists_in_ollama; then
+            echo "[!] 错误：模型库中没有 ${SERVED_MODEL_NAME}，请检查 $OLLAMA_MODELS"
+            $0 stop
+            exit 1
         fi
 
         warmup_model
+        show_mtp_state
 
         echo "[✓] Ollama 服务运行中，PID: $PID"
         ;;
@@ -304,18 +271,14 @@ case "$1" in
     restart)
         $0 stop
         sleep 2
-        $0 start
+        $0 start "$GPU_ID"
         ;;
 
     status)
         if is_running; then
             echo "[✓] Ollama 服务正在运行，PID: $(cat $PID_FILE)"
             curl -s "http://$OLLAMA_HOST/v1/models" | grep -q "$SERVED_MODEL_NAME" && echo "[✓] 模型 ${SERVED_MODEL_NAME} 已就绪！" || echo "[!] 模型尚未加载或初始化中..."
-            if model_cache_valid; then
-                echo "[✓] 指纹缓存：有效（下次 start 会跳过导入）"
-            else
-                echo "[!] 指纹缓存：缺失或失效（下次 start 会重新导入）"
-            fi
+            show_mtp_state
         else
             echo "[!] Ollama 服务未运行。"
         fi
@@ -326,7 +289,7 @@ case "$1" in
         ;;
 
     *)
-        echo "使用方法: $0 {start|stop|restart|status|log}"
+        echo "使用方法: $0 {start|stop|restart|status|log} [gpu_id]  (默认 gpu_id=0)"
         exit 1
         ;;
 esac

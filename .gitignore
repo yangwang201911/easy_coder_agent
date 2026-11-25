@@ -1,19 +1,27 @@
-Qwen
-vllm-env
+# ===== 模型权重 / 大文件（不入库，用 server/backends/ollama/bootstrap.sh 下载）=====
+server/backends/ollama/models/blobs/
+server/backends/ollama/models/manifests/
+server/backends/ollama/models/mmproj/
+server/backends/ollama/models/Modelfile*
+server/backends/ollama/vl/*.gguf
+
+# ===== 运行时产物 =====
 *.log
 *.pid
 nohup.out
-unsloth
-Modelfile
-OpenVINO
-ovms_cache
-llama.cpp
-
-.ollama_model_fingerprint
-Modelfile
-ollama_server.log
-ollama_server.pid
 tmp/
-EOF
+.ollama_model_fingerprint
+ovms_cache
+ovms_runtime
+
+# ===== 本地环境 / 模型目录（按需下载，不入库）=====
+Qwen
+vllm-env
+unsloth
+OpenVINO
+llama.cpp
+Modelfile
+
+# ===== 其它 =====
 .agent
 hellowork

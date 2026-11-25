@@ -1,5 +1,5 @@
 
-# curl -s -X POST http://10.112.106.102:8000/v1/chat/completions \
+# curl -s -X POST http://<YOUR_SERVER_IP>:8000/v1/chat/completions \
 #   -H "Content-Type: application/json" \
 #   -d '{
 #     "model": "qwen3.8-27b",
