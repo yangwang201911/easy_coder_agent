@@ -1,5 +1,0 @@
-# Development / packaging tools
--r requirements.txt
-pytest
-build
-pyinstaller
