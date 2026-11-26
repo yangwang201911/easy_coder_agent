@@ -219,6 +219,8 @@ def test_effort_rejection_drops_field_and_notifies():
         request = _FakeReq()
         headers = {}
         text = ""
+        history = []
+        next_request = None
 
     def _bad_request(message: str) -> openai.BadRequestError:
         return openai.BadRequestError(message=message, response=_FakeResp(), body=None)
