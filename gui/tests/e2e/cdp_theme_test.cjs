@@ -17,6 +17,16 @@ function check(name, cond) {
   const cdp = connectCdp(url);
   await cdp.opened;
   const evalJs = cdp.evalJs;
+  // The backend may still be initializing right after boot; the first
+  // context_strategies RPC can take a few seconds. Poll for the dialog
+  // instead of a fixed wait so the test is robust to boot latency.
+  const openSettings = async () => {
+    await evalJs("document.getElementById('rail-settings').click()");
+    for (let i = 0; i < 60; i++) {
+      if (await evalJs("!!document.querySelector('.settings')")) return;
+      await wait(100);
+    }
+  };
 
   // wait for the project to open (S.config is set in openProject; Settings
   // needs it, so we must not open the dialog before this)
@@ -34,8 +44,7 @@ function check(name, cond) {
   check("default body bg rgb(240,240,240)", (await bg()) === "rgb(240, 240, 240)");
 
   // 2) open settings, go to appearance, pick dark
-  await evalJs("document.getElementById('rail-settings').click()");
-  await wait(400);
+  await openSettings();
   check("settings modal shown", await evalJs("!!document.querySelector('.settings')"));
   check("appearance tab exists", await evalJs("!!document.querySelector('.settings .tabs button[data-p=\"appearance\"]')"));
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"appearance\"]').click()");

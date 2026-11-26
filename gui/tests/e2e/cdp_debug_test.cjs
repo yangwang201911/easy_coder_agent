@@ -25,6 +25,26 @@ function check(name, cond) {
   const cdp = connectCdp(url);
   await cdp.opened;
   const evalJs = cdp.evalJs;
+  // The backend may still be initializing right after boot; the first
+  // context_strategies RPC can take a few seconds. Poll for the dialog
+  // instead of a fixed wait so the test is robust to boot latency.
+  const openSettings = async () => {
+    await evalJs("document.getElementById('rail-settings').click()");
+    for (let i = 0; i < 60; i++) {
+      if (await evalJs("!!document.querySelector('.settings')")) return;
+      await wait(100);
+    }
+  };
+  // Poll until a text node contains the expected substring (async RPCs fill
+  // these after the tab/dialog opens).
+  const pollText = async (expr, substr, tries = 200) => {
+    for (let i = 0; i < tries; i++) {
+      const v = await evalJs(expr);
+      if (typeof v === "string" && v.includes(substr)) return v;
+      await wait(100);
+    }
+    return await evalJs(expr);
+  };
 
   for (let i = 0; i < 150; i++) {
     const lbl = await evalJs("document.getElementById('titlebar-name') && document.getElementById('titlebar-name').textContent");
@@ -32,10 +52,13 @@ function check(name, cond) {
     await wait(200);
   }
   check("project opened", (await evalJs("document.getElementById('titlebar-name').textContent")).includes("Coder Agent:"));
+  // Warm up the backend: the first prompt_dumps RPC races with startup
+  // initialization and can take ~10s; calling it once here ensures the debug
+  // tab's own prompt_dumps call (which fills .dpath) returns quickly.
+  await evalJs(`window.__call("prompt_dumps", {})`, 30000);
 
   // 1) open settings, go to the debug tab
-  await evalJs("document.getElementById('rail-settings').click()");
-  await wait(500);
+  await openSettings();
   check("settings modal shown", await evalJs("!!document.querySelector('.settings')"));
   check("debug tab exists", await evalJs("!!document.querySelector('.settings .tabs button[data-p=\"debug\"]')"));
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"debug\"]').click()");
@@ -44,15 +67,15 @@ function check(name, cond) {
   const cb = () => evalJs("(()=>{const c=document.querySelector('[data-s=\"debug\"][data-k=\"prompt_dump\"]'); return c ? c.checked : null;})()");
   check("prompt_dump checkbox exists", (await cb()) === false);
   check("prompt_dump default off", (await cb()) === false);
-  check("dump dir shown", (await evalJs("document.querySelector('.dpath').textContent")).includes(".agent/debug/prompts"));
+  const dpath = await pollText("document.querySelector('.dpath').textContent", "Dump directory");
+  check("dump dir shown", typeof dpath === "string" && dpath.includes(".agent/debug/prompts"));
   check("view/clear buttons", await evalJs("!!document.querySelector('.d-view') && !!document.querySelector('.d-clear')"));
 
   // 2) enable + save, reopen: switch must be on
   await evalJs("(()=>{const c=document.querySelector('[data-s=\"debug\"][data-k=\"prompt_dump\"]'); c.checked=true;})()");
   await evalJs("document.querySelector('#modal .foot .yes').click()");
   await wait(600);
-  await evalJs("document.getElementById('rail-settings').click()");
-  await wait(500);
+  await openSettings();
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"debug\"]').click()");
   await wait(300);
   check("prompt_dump persisted on", (await cb()) === true);
@@ -60,14 +83,14 @@ function check(name, cond) {
   await wait(200);
 
   // 3) View dumps dialog: empty state
-  await evalJs("document.getElementById('rail-settings').click()");
-  await wait(500);
+  await openSettings();
   await evalJs("document.querySelector('.settings .tabs button[data-p=\"debug\"]').click()");
   await wait(300);
   await evalJs("document.querySelector('.d-view').click()");
   await wait(500);
   check("dumps modal shown", await evalJs("!!document.querySelector('.modal.dumps')"));
-  check("dumps empty state", (await evalJs("document.querySelector('.modal.dumps .dlist').textContent")).includes("no dumps yet"));
+  const dlist = await pollText("document.querySelector('.modal.dumps .dlist').textContent", "no dumps yet");
+  check("dumps empty state", typeof dlist === "string" && dlist.includes("no dumps yet"));
   await evalJs("document.querySelector('.modal.dumps .no').click()");
   await wait(200);
   check("dumps modal closed", !(await evalJs("!!document.querySelector('.modal.dumps')")));
@@ -78,7 +101,7 @@ function check(name, cond) {
   // stacked confirm modal appears; accept it
   await evalJs("document.querySelector('.modal-backdrop.stacked .yes').click()");
   await wait(400);
-  const clearMsg = await evalJs("document.querySelector('.page[data-p=\"debug\"] .msg').textContent");
+  const clearMsg = await pollText("document.querySelector('.page[data-p=\"debug\"] .msg').textContent", "Deleted");
   check("clear ok message", typeof clearMsg === "string" && clearMsg.includes("Deleted 0"));
 
   await evalJs("document.querySelector('.settings .close-x').click()");
