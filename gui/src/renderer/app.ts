@@ -2894,11 +2894,12 @@ async function renderProjList() {
   const list = loadProjects().filter((p) => p.mode === (remoteMode ? "remote" : "local"));
   const last = lastProjectName();
   // drop the selection if it no longer matches the current mode
-  if (projSelected && !list.includes(projSelected)) projSelected = null;
+  const selProj = projSelected;
+  if (selProj && !list.some((q) => q.name === selProj.name)) projSelected = null;
   const el = $("proj-list");
   el.innerHTML = list.length
     ? list.map((p) => {
-        const sel = p === projSelected ? " sel" : "";
+        const sel = projSelected && p.name === projSelected.name ? " sel" : "";
         const cur = S.root === p.path ? " cur" : "";
         return `<div class="projrow${sel}${cur}" data-name="${esc(p.name)}">` +
           `<span class="pname">${esc(p.name)}${p.name === last ? "  (last)" : ""}</span>` +

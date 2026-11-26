@@ -1,9 +1,11 @@
-// Smoke test: the Projects dialog opens, lists saved projects, and the
-// remote dir browser works against the local (local-server) backend.
+// Smoke test: the Projects sub-tab (left rail) lists saved projects, has the
+// Add/Rename/Delete toolbar, and the local "Add project" flow uses the native
+// folder picker (mocked via the __pickDirectory hook).
 const { spawnApp, killApp, getWsUrl, connectCdp, wait } = require("./cdp_test_lib.cjs");
 const path = require("path");
 
-const app = spawnApp({ root: process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", ".."), onLog: (d) => process.stdout.write(`[app] ${d}`) });
+const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", "..");
+const app = spawnApp({ root: ROOT, onLog: (d) => process.stdout.write(`[app] ${d}`) });
 
 let failed = false;
 function check(label, ok) {
@@ -28,40 +30,32 @@ function check(label, ok) {
   }
   check("project opened on boot", opened);
 
-  // 1) Projects dialog opens with the expected buttons
-  await evalJs("document.getElementById('rail-project-menu').click()");
-  await wait(300);
-  const dlg = await evalJs(`JSON.stringify({
-    show: !!document.querySelector('#modal-backdrop.show'),
-    head: document.querySelector('#modal .head') && document.querySelector('#modal .head').textContent,
-    btns: [...document.querySelectorAll('#modal .btnrow button')].map(b => b.textContent),
-  })`);
-  const o = JSON.parse(dlg);
-  check("projects dialog visible", o.show);
-  check("dialog title", o.head === "Projects");
-  check("dialog buttons", o.btns.join(",") === "+ Add project...,Rename,Delete");
+  // 1) Projects sub-tab shows the saved projects with the toolbar buttons
+  await evalJs(`document.querySelector('#project-subs .subtab[data-sub="projects"]').click()`);
+  let rows = [];
+  for (let i = 0; i < 60; i++) {
+    rows = await evalJs("[...document.querySelectorAll('#proj-list .projrow .pname')].map(e => e.textContent)");
+    if (rows.length) break;
+    await wait(100);
+  }
+  check("projects sub-tab visible", await evalJs("!document.getElementById('project-sub-projects').classList.contains('hidden')"));
+  check("toolbar buttons", (await evalJs("[...document.querySelectorAll('#proj-toolbar button')].map(b => b.title).join(',')")) === "Add a project,Rename the selected project,Delete the selected project");
 
   // 2) the auto-opened root is remembered as a saved project (via openProject)
-  const rows = await evalJs("[...document.querySelectorAll('#modal .projrow .pname')].map(e => e.textContent)");
-  check("auto-opened project is in the list", rows.some((n) => n.includes("agent_ts_gui")));
+  const rootName = path.basename(ROOT);
+  check("auto-opened project is in the list", rows.some((n) => n.includes(rootName)));
 
-  // 3) local mode: "+ Add project..." uses the native folder picker (mocked via
-  // the __pickDirectory hook); the remote dir browser is covered by cdp_remote_test
-  await evalJs("document.querySelector('#modal .yes').click()"); // close projects dialog
-  await wait(200);
+  // 3) local mode: "Add project" uses the native folder picker (mocked via the
+  // __pickDirectory hook); the remote dir browser is covered by cdp_remote_test
   const add = await evalJs(`(async () => {
     window.__pickDirectory = () => Promise.resolve("/tmp");
-    document.getElementById('rail-project-menu').click();
-    await new Promise(r => setTimeout(r, 200));
-    document.querySelector('#modal .add-project').click();
+    document.getElementById('proj-add-btn').click();
     await new Promise(r => setTimeout(r, 500));
     // the name input modal must be up (native picker was mocked, no browser rows)
     const promptUp = !!document.querySelector('.modal-backdrop.stacked .pinput');
-    const hasBrowser = !!document.querySelector('#modal .pathbar');
-    document.querySelector('.modal-backdrop.stacked .pno')?.click()
-      ?? document.querySelector('.modal-backdrop.stacked .no')?.click();
+    const hasBrowser = !!document.querySelector('#proj-list .pathbar');
+    document.querySelector('.modal-backdrop.stacked .no')?.click();
     await new Promise(r => setTimeout(r, 200));
-    document.querySelector('#modal .yes').click();
     return JSON.stringify({ promptUp, hasBrowser });
   })()`);
   const a = JSON.parse(add);
