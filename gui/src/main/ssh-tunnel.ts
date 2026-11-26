@@ -206,6 +206,7 @@ export async function openTunnel(t: SshTarget, hooks: TunnelHooks, opts: TunnelO
   if (!ready) {
     closing = true;
     try { client.end(); } catch { /* ignore */ }
+    try { client.destroy(); } catch { /* ignore */ }
     throw failure ?? new Error("ssh connection closed before login finished");
   }
   if (usedPassword) opts.passwords.set(cacheKey, usedPassword);
@@ -227,6 +228,7 @@ export async function openTunnel(t: SshTarget, hooks: TunnelHooks, opts: TunnelO
   } catch (e) {
     closing = true;
     try { client.end(); } catch { /* ignore */ }
+    try { client.destroy(); } catch { /* ignore */ }
     throw e;
   }
   server = srv;
@@ -237,6 +239,7 @@ export async function openTunnel(t: SshTarget, hooks: TunnelHooks, opts: TunnelO
       closing = true;
       if (server) { server.removeAllListeners(); server.close(); server = null; }
       try { client.end(); } catch { /* ignore */ }
+      try { client.destroy(); } catch { /* ignore */ }
     },
   };
 }
