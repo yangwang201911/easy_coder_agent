@@ -9,6 +9,13 @@ import { backendUrlFromLine } from "./backend-output";
 import { openTunnel, SshInteractionRequired, Tunnel } from "./ssh-tunnel";
 import { showPrompt } from "./prompt-window";
 
+// When the GUI runs as a subprocess (test harness / launcher) the parent may
+// close our stdout/stderr pipe. A later console.log in a timer would then throw
+// EPIPE and crash the whole main process. Swallow EPIPE on the std streams.
+for (const s of [process.stdout, process.stderr]) {
+  s.on("error", (e) => { if (e && e.code === "EPIPE") return; throw e; });
+}
+
 // Backend location: in dev the repo's backend/ dir + its venv python; in a
 // packaged app a standalone PyInstaller bundle shipped in resources/backend.
 function backendInfo(): { cmd: string; args: string[]; cwd: string } {
