@@ -37,9 +37,9 @@ function check(label, ok) {
   // window.api is a contextBridge proxy: assigning to it silently fails, so the
   // app exposes a __pickDirectory test hook (see window.__onEvent).
   await evalJs(`window.__pickDirectory = () => Promise.resolve(${JSON.stringify(ROOT_B)})`);
-  await evalJs("document.getElementById('rail-project-menu').click()");
+  await evalJs("document.querySelector('#project-subs .subtab[data-sub=\"projects\"]').click()");
   await wait(300);
-  await evalJs("document.querySelector('#modal .add-project').click()");
+  await evalJs("document.querySelector('#proj-add-btn').click()");
   await wait(300);
 
   // the name input modal must be up (previously window.prompt returned null and
@@ -50,15 +50,13 @@ function check(label, ok) {
   // accept the pre-filled name (Enter)
   await evalJs(`document.querySelector('.modal-backdrop.stacked .pinput').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
   await wait(300);
-  const rows = await evalJs("[...document.querySelectorAll('#modal .projrow .pname')].map(e => e.textContent)");
+  const rows = await evalJs("[...document.querySelectorAll('#proj-list .projrow .pname')].map(e => e.textContent)");
   check("picked project appears in the list", rows.some((n) => n.includes("proj_b")));
-  const mode = await evalJs("[...document.querySelectorAll('#modal .projrow .pmode')].map(e => e.textContent)");
+  const mode = await evalJs("[...document.querySelectorAll('#proj-list .projrow .pmode')].map(e => e.textContent)");
   check("project is saved as local", mode.some((m) => m === "local"));
 
-  // Open it: root label switches to B
-  await evalJs(`[...document.querySelectorAll('#modal .projrow')].find(r => r.textContent.includes('proj_b')).click()`);
-  await wait(200);
-  await evalJs("document.querySelector('#modal .open').click()");
+  // Open it: double-click the row, root label switches to B
+  await evalJs(`[...document.querySelectorAll('#proj-list .projrow')].find(r => r.textContent.includes('proj_b')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   let switched = false;
   for (let i = 0; i < 40; i++) {
     const lbl = await evalJs("document.getElementById('titlebar-name').textContent");

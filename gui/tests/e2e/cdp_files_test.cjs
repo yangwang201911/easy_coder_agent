@@ -50,8 +50,8 @@ const check = (name, ok, extra = "") => {
   }
   check("project opened, tree has rows", opened);
 
-  // 1) Files tab exists in the left tabs
-  check("left Files tab exists", !!(await evalJs(`!!document.querySelector('#left-rail .tab[data-tab="files"]')`)));
+  // 1) Files sub-tab exists in the left Project tab
+  check("left Files tab exists", !!(await evalJs(`!!document.querySelector('#left-rail .tab[data-tab="project"]') && !!document.querySelector('#project-subs .subtab[data-sub="files"]')`)));
 
   // 1b) open the seeded session (the boot session is fresh, the seeded one holds the turn)
   await evalJs(`document.querySelector('#left-rail .tab[data-tab="sessions"]').click()`);
@@ -69,8 +69,9 @@ const check = (name, ok, extra = "") => {
   check("seeded session opened", seeded);
   await wait(800);
 
-  // 2) switch to the Files tab and verify the tree shows src/
-  await evalJs(`document.querySelector('#left-rail .tab[data-tab="files"]').click()`);
+  // 2) switch to the Files sub-tab and verify the tree shows src/
+  await evalJs(`document.querySelector('#left-rail .tab[data-tab="project"]').click()`);
+  await evalJs(`document.querySelector('#project-subs .subtab[data-sub="files"]').click()`);
   await wait(300);
   const treeNames = await evalJs(`Array.from(document.querySelectorAll('#file-tree .tree-row')).map(e => e.textContent)`);
   check("tree shows src dir", (treeNames ?? []).some((n) => n.includes("src")), JSON.stringify(treeNames));

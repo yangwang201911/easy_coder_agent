@@ -61,11 +61,18 @@ function check(label, ok) {
     }
     check("project opened via remote server", opened);
 
-    // 3) connection tab shows remote mode
+    // 3) connection tab shows remote mode (the settings modal is built
+    // asynchronously: wait for the connection tab to exist and become active)
     await evalJs("document.getElementById('rail-settings').click()");
-    await wait(300);
-    await evalJs("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()");
-    await wait(500);
+    for (let i = 0; i < 40; i++) {
+      if (await evalJs("!!document.querySelector('#modal .settings .tabs button[data-p=connection]')")) break;
+      await wait(200);
+    }
+    await evalJs("[...document.querySelectorAll('#modal .settings .tabs button')].find(b => b.dataset.p === 'connection').click()");
+    for (let i = 0; i < 40; i++) {
+      if (await evalJs("!!document.querySelector('#modal .page[data-p=connection].active')")) break;
+      await wait(200);
+    }
     const conn = await evalJs(`JSON.stringify({
       mode: document.querySelector('#modal .c-mode') && document.querySelector('#modal .c-mode').value,
       host: document.querySelector('#modal .c-host') && document.querySelector('#modal .c-host').value,

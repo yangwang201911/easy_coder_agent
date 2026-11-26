@@ -100,11 +100,11 @@ function check(label, ok) {
     for (let i = 0; i < 20; i++) {
       const t = String(await evalJs("document.getElementById('titlebar-name') && document.getElementById('titlebar-name').textContent"));
       if (t.includes("Coder Agent:")) { opened = true; break; }
-      // open it through the projects dialog (the app's openProjectNamed path)
+      // open it through the Projects sub-tab (the app's openProjectNamed path)
       await evalJs(`(async () => {
-        document.getElementById('rail-project-menu').click();
+        document.querySelector('#project-subs .subtab[data-sub="projects"]').click();
         await new Promise(r => setTimeout(r, 400));
-        const row = document.querySelector('#modal .projrow');
+        const row = document.querySelector('#proj-list .projrow');
         if (row) row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
       })()`);
       await wait(1500);
@@ -122,11 +122,17 @@ function check(label, ok) {
 
     // settings > model tab: server fields editable, Save works and persists
     await evalJs("document.getElementById('rail-settings').click()");
-    await wait(800);
-    const modelInput = await evalJs(`(() => {
-      const i = document.querySelector('#modal [data-s="server"][data-k="model"]');
-      return i ? { tagName: i.tagName, disabled: i.disabled, value: i.value } : null;
-    })()`);
+    // the model <select> loads its options from the server; poll until it is
+    // populated (a fixed wait races the first RPC under load)
+    let modelInput = null;
+    for (let i = 0; i < 40; i++) {
+      modelInput = await evalJs(`(() => {
+        const i = document.querySelector('#modal [data-s="server"][data-k="model"]');
+        return i ? { tagName: i.tagName, disabled: i.disabled, value: i.value } : null;
+      })()`);
+      if (modelInput && modelInput.tagName === "SELECT" && !modelInput.disabled && modelInput.value.length > 0) break;
+      await wait(250);
+    }
     // the model field is a <select> (options load from the server on focus);
     // the saved value must be present as an option and selectable
     check("model field present & editable", !!modelInput && modelInput.tagName === "SELECT" && !modelInput.disabled && modelInput.value.length > 0);
@@ -134,8 +140,13 @@ function check(label, ok) {
     // select without the option would silently stay "")
     await evalJs(`(() => { const s = document.querySelector('#modal [data-s="server"][data-k="model"]'); s.add(new Option("test-model-xyz", "test-model-xyz")); s.value = "test-model-xyz"; })()`);
     await evalJs("document.querySelector('#modal .yes').click()");
-    await wait(800);
-    const savedMsg = String(await evalJs("document.getElementById('chat').textContent"));
+    // the save RPC + chat message are async; poll for the confirmation
+    let savedMsg = "";
+    for (let i = 0; i < 40; i++) {
+      savedMsg = String(await evalJs("document.getElementById('chat').textContent"));
+      if (savedMsg.includes("settings saved")) break;
+      await wait(250);
+    }
     check("settings saved", savedMsg.includes("settings saved"));
     const savedVal = await evalJs(`(() => {
       document.getElementById('rail-settings').click();

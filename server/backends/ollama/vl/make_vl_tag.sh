@@ -13,7 +13,7 @@ TAG=map-k4v-vl
 # 动态计算 mmproj 的 sha256 与大小（兼容任意来源的 mmproj，不再写死）
 DIGEST="sha256:$(sha256sum "$SRC" | cut -d' ' -f1)"
 SIZE=$(stat -c%s "$SRC" 2>/dev/null || stat -f%z "$SRC")
-DST="$M/blobs/${DIGEST#sha256:}"
+DST="$M/blobs/${DIGEST/:/-}"
 
 # 1. mmproj 作为 blob 放进 blobs/（按 sha256 命名, 与 manifest digest 对应）
 mkdir -p "$M/blobs"
@@ -39,5 +39,10 @@ json.dump(man, open(dst, "w"), indent=1)
 print("manifest written:", dst)
 EOF
 
-# 3. 校验
-OLLAMA_MODELS="$M" ollama show "smtek/Swift-Qwen3.8-27B:$TAG" 2>&1 | head -20 || true
+# 3. 校验: manifest 必含 projector 层；bootstrap 提供私有服务时再用 ollama show 确认
+MF="$M/manifests/registry.ollama.ai/smtek/Swift-Qwen3.8-27B/$TAG"
+{ [ -f "$MF" ] && grep -q "$DIGEST" "$MF"; } || { echo "verify FAILED: $MF"; exit 1; }
+if [ "${OLLAMA_TMP_SERVER:-}" = "1" ]; then
+  ollama show "smtek/Swift-Qwen3.8-27B:$TAG" >/dev/null || { echo "ollama show FAILED: $TAG"; exit 1; }
+fi
+echo "verify ok: $TAG"

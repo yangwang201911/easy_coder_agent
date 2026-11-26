@@ -26,19 +26,20 @@ test("backend readiness accepts POSIX LF and Windows CRLF stdout", () => {
 
 // Exercise the actual renderer RPC section without needing an Electron window.
 function rpcClient(send, getBackendUrl = async () => "ws://127.0.0.1:8931") {
-  const source = fs.readFileSync(path.join(__dirname, "..", "..", "src/renderer/app.ts"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", "..", "src/renderer/core.ts"), "utf8");
   const start = source.indexOf("let nextId = 0;");
-  const end = source.indexOf("// ------------------------------------------------------------------- status", start);
+  const end = source.indexOf("// exposed for automated UI tests", start);
   assert.ok(start >= 0 && end > start);
   const timers = [];
   let reply;
   const context = {
+    exports: {},
     window: { api: { send, getBackendUrl, onReply: cb => { reply = cb; } } },
     setTimeout: (cb, delay) => { timers.push({ cb, delay }); },
   };
   vm.createContext(context);
   vm.runInContext(compile(source.slice(start, end)), context);
-  return { call: context.call, reply: msg => reply(msg), timers };
+  return { call: context.exports.call, reply: msg => reply(msg), timers };
 }
 
 test("RPCs waiting for readiness retain distinct IDs", async () => {

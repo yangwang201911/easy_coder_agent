@@ -5,7 +5,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # ==================== 用户配置区 ====================
 # 自包含模型库（manifest + blobs），整个目录拷到其它机器即可使用
 export OLLAMA_MODELS="${SCRIPT_DIR}/models"
-SERVED_MODEL_NAME="smtek/Swift-Qwen3.8-27B:map-k4v"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-smtek/Swift-Qwen3.8-27B:map-k4v}"
+# VL: 1=视觉模型(-vl tag), 0=纯文本; 默认自动: 已执行 bootstrap.sh 生成 -vl tag 则用视觉
+VL_MANIFEST="${OLLAMA_MODELS}/manifests/registry.ollama.ai/smtek/Swift-Qwen3.8-27B/map-k4v-vl"
+[ -z "${VL:-}" ] && { [ -f "$VL_MANIFEST" ] && VL=1 || VL=0; }
+[ "$VL" = "1" ] && SERVED_MODEL_NAME="${SERVED_MODEL_NAME%-vl}-vl"
 
 # 上下文长度：留空则使用模型自带的 num_ctx(143360)；设置后仅在预热请求中覆盖
 # 注意：客户端请求的 num_ctx 与预热不一致会触发模型重新加载
@@ -62,72 +66,12 @@ get_gpu_names() {
 }
 GPU_NAME="$(get_gpu_names)"
 
-# ==================== 本机 IP 自动探测 ====================
-# 手动覆盖（可选）：执行前 export OLLAMA_BIND_IP="192.168.1.25"
-# 指定优先网卡（可选）：执行前 export OLLAMA_PREFER_IFACE="eth0"
-get_host_ip() {
-    local ip iface
-
-    # 1) 用户显式指定，最高优先级
-    if [ -n "${OLLAMA_BIND_IP:-}" ]; then
-        printf '%s\n' "$OLLAMA_BIND_IP"
-        return 0
-    fi
-
-    # 2) 用户指定了优先网卡
-    if [ -n "${OLLAMA_PREFER_IFACE:-}" ] && command -v ip >/dev/null 2>&1; then
-        ip=$(ip -4 -o addr show dev "$OLLAMA_PREFER_IFACE" scope global 2>/dev/null \
-             | awk '{a=$4; sub(/\/.*/,"",a); print a; exit}')
-        if [ -n "$ip" ]; then
-            printf '%s\n' "$ip"
-            return 0
-        fi
-    fi
-
-    # 3) 默认出口路由的源地址（只查路由表，不会真的发包）
-    if command -v ip >/dev/null 2>&1; then
-        ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
-             | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
-        case "$ip" in
-            ""|127.*|0.0.0.0|169.254.*) ;;
-            *) printf '%s\n' "$ip"; return 0 ;;
-        esac
-    fi
-
-    # 4) 遍历全局地址，跳过 docker/veth/br-/virbr 等虚拟网卡
-    if command -v ip >/dev/null 2>&1; then
-        while read -r iface ip; do
-            case "$iface" in
-                docker*|veth*|br-*|virbr*|cni*|flannel*|tun*|tap*|kube*) continue ;;
-            esac
-            case "$ip" in
-                ""|127.*|169.254.*) continue ;;
-            esac
-            printf '%s\n' "$ip"
-            return 0
-        done < <(ip -4 -o addr show scope global 2>/dev/null | awk '
-            { a=$4; sub(/\/.*/,"",a); print $2, a }')
-    fi
-
-    # 5) hostname -I 兜底
-    if command -v hostname >/dev/null 2>&1; then
-        for ip in $(hostname -I 2>/dev/null); do
-            case "$ip" in
-                ""|127.*|169.254.*) continue ;;
-            esac
-            printf '%s\n' "$ip"
-            return 0
-        done
-    fi
-
-    # 6) 最终兜底
-    printf '127.0.0.1\n'
-}
-# ========================================================
+. "$SCRIPT_DIR/../../common/utils.sh"
 
 ServerIP="$(get_host_ip)"
-PORT="8000"
-export OLLAMA_HOST="${ServerIP}:${PORT}"
+PORT="${OLLAMA_PORT:-8000}"
+# 客户端(curl/ollama CLI)走回环地址，避免 0.0.0.0 被公司代理拦截；服务本身监听 0.0.0.0
+export OLLAMA_HOST="127.0.0.1:${PORT}"
 export OLLAMA_KEEP_ALIVE="-1"
 
 LOG_FILE="${SCRIPT_DIR}/ollama_server_mtp.log"
@@ -151,7 +95,7 @@ is_running() {
 wait_for_server() {
     echo "[+] 等待 Ollama API 服务初始化..."
     for i in {1..15}; do
-        if curl -s "http://${OLLAMA_HOST}/api/version" >/dev/null 2>&1; then
+        if curl -sf "http://${OLLAMA_HOST}/api/version" >/dev/null 2>&1; then
             echo "[✓] Ollama API 服务就绪！"
             return 0
         fi
@@ -163,14 +107,20 @@ wait_for_server() {
 
 # 判断模型是否已在本地模型库中
 model_exists_in_ollama() {
-    "$OLLAMA_BIN" list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$SERVED_MODEL_NAME"
+    # 刚启动时 ollama list 的缓存可能还没就绪，用 /api/show 并重试
+    local i
+    for i in {1..15}; do
+        curl -sf "http://${OLLAMA_HOST}/api/show" -d "{\"model\": \"${SERVED_MODEL_NAME}\"}" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
 }
 
 warmup_model() {
     echo "[+] 正在发送 API 请求将模型预加载至 GPU 显存..."
     local options=""
     [ -n "$NUM_CTX" ] && options=", \"options\": {\"num_ctx\": ${NUM_CTX}}"
-    curl -s "http://${OLLAMA_HOST}/api/generate" -d "{
+    curl -sf --max-time 900 "http://${OLLAMA_HOST}/api/generate" -d "{
       \"model\": \"${SERVED_MODEL_NAME}\",
       \"prompt\": \"warmup\",
       \"keep_alive\": -1${options}
@@ -218,10 +168,10 @@ case "$1" in
 
         echo "[+] 正在启动 Ollama 服务 (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}, 设备: ${GPU_NAME})..."
         echo "[+] 模型库: $OLLAMA_MODELS"
-        echo "[+] 服务地址: http://$OLLAMA_HOST"
+        echo "[+] 服务地址: http://${ServerIP}:${PORT}"
         echo "[+] 日志输出: $LOG_FILE"
 
-        nohup "$OLLAMA_BIN" serve > "$LOG_FILE" 2>&1 &
+        OLLAMA_HOST="0.0.0.0:${PORT}" nohup "$OLLAMA_BIN" serve > "$LOG_FILE" 2>&1 &
         PID=$!
         echo $PID > "$PID_FILE"
 
@@ -311,7 +261,9 @@ manage_mtp.sh - 自包含模型库 + MTP 投机解码 的 Ollama 服务管理器
   OLLAMA_MODELS       模型库目录，默认 <脚本目录>/models
   OLLAMA_BIND_IP      手动指定绑定 IP（默认自动探测本机出口 IP）
   OLLAMA_PREFER_IFACE 指定优先网卡（如 eth0），配合 IP 探测
-  OLLAMA_HOST         直接指定 服务地址 IP:端口（默认 <探测IP>:8000）
+  OLLAMA_PORT         服务端口，默认 8000（服务监听 0.0.0.0，本机客户端用 127.0.0.1）
+  VL                  1=视觉模型(:map-k4v-vl) 0=纯文本，默认自动（存在 -vl tag 则用视觉）
+  SERVED_MODEL_NAME   手动指定模型 tag
   OLLAMA_KEEP_ALIVE   模型常驻时间，默认 -1（常驻显存）
   OLLAMA_FLASH_ATTENTION / OLLAMA_KV_CACHE_TYPE  推理优化，默认 true / q8_0
 

@@ -21,7 +21,7 @@ SKIP_VISION="${SKIP_VISION:-}"
 #   1) MMPROJ_LOCAL: 本地已有 mmproj 的绝对路径（可选，留空则走下载）
 #   2) 从 HuggingFace 下载（HF_ENDPOINT 可切换国内镜像）
 MMPROJ_LOCAL=""
-HF_ENDPOINT="${HF_ENDPOINT:-}"          # 留空则运行时交互询问；可预设 https://hf-mirror.com
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"   # 国内镜像；海外可设为 https://huggingface.co
 MMPROJ_REPO="unsloth/Qwen3.8-27B-GGUF"
 MMPROJ_FILENAME="mmproj-F16.gguf"
 MMPROJ_FILE="$VL/mmproj-Qwen3.8-27B-F16.gguf"
@@ -32,11 +32,42 @@ MMPROJ_FILE="$VL/mmproj-Qwen3.8-27B-F16.gguf"
 
 mkdir -p "$MODELS/blobs" "$MODELS/manifests" "$VL"
 
+# ollama CLI 只与运行中的服务通信，系统服务可能用别的模型目录，故起一个私有临时服务
+TMP_PORT="${BOOTSTRAP_OLLAMA_PORT:-11500}"
+TMP_PID=""
+trap '[ -n "$TMP_PID" ] && kill "$TMP_PID" 2>/dev/null; true' EXIT
+start_tmp_server() {
+  [ -n "$TMP_PID" ] && return 0
+  if ss -tln 2>/dev/null | grep -q ":${TMP_PORT} "; then
+    echo "[!] 临时端口 $TMP_PORT 已被占用，请设置 BOOTSTRAP_OLLAMA_PORT"; exit 1
+  fi
+  export OLLAMA_MODELS="$MODELS" OLLAMA_HOST="127.0.0.1:${TMP_PORT}" CUDA_VISIBLE_DEVICES="" OLLAMA_VULKAN=false
+  ollama serve >"$HERE/tmp/bootstrap_serve.log" 2>&1 &
+  TMP_PID=$!
+  for _ in $(seq 1 30); do
+    curl -sf "http://${OLLAMA_HOST}/api/version" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "[!] 临时 ollama 服务启动失败，见 $HERE/tmp/bootstrap_serve.log"; exit 1
+}
+mkdir -p "$HERE/tmp"
+
 echo "==> [1/3] 基座模型: $MODEL_NAME -> $MODELS"
-if [ -f "$MODELS/manifests/registry.ollama.ai/smtek/Swift-Qwen3.8-27B/map-k4v" ]; then
-  echo "    已存在，跳过 pull"
+BASE_MF="$MODELS/manifests/registry.ollama.ai/smtek/Swift-Qwen3.8-27B/map-k4v"
+# manifest 在仓库里但 blobs 可能缺失(被 gitignore)，需逐层校验
+base_ready() {
+  [ -f "$BASE_MF" ] && python3 - "$BASE_MF" "$MODELS/blobs" <<'PY'
+import json, os, sys
+m = json.load(open(sys.argv[1]))
+ds = [m["config"]["digest"]] + [l["digest"] for l in m["layers"]]
+sys.exit(0 if all(os.path.isfile(os.path.join(sys.argv[2], d.replace(":", "-"))) or os.path.isfile(os.path.join(sys.argv[2], d.split(":")[1])) for d in ds) else 1)
+PY
+}
+if base_ready; then
+  echo "    blobs 完整，跳过 pull"
 else
-  OLLAMA_MODELS="$MODELS" ollama pull "$MODEL_NAME"
+  start_tmp_server
+  ollama pull "$MODEL_NAME"
 fi
 
 # ---------- 视觉能力开关（一次性询问，可用 SKIP_VISION 预设） ----------
@@ -75,18 +106,20 @@ if [ "$ENABLE_VL" = "1" ]; then
     fi
     URL="$HF_ENDPOINT/$MMPROJ_REPO/resolve/main/$MMPROJ_FILENAME"
     echo "    从 URL 下载: $URL"
-    curl -fL --noproxy '*' -o "$MMPROJ_FILE" "$URL"
+    curl -fL -o "$MMPROJ_FILE" "$URL"
   fi
 
   echo "==> [3/3] 构建 VL tag (:map-k4v-vl)"
-  bash "$VL/make_vl_tag.sh"
+  start_tmp_server
+  OLLAMA_TMP_SERVER=1 bash "$VL/make_vl_tag.sh"
 else
   echo "==> [2/3][3/3] 跳过视觉（VL）准备，仅提供文本模型 :map-k4v"
 fi
 
 echo ""
 echo "🎉 完成。启动服务:"
-echo "   cd $HERE && OLLAMA_MODELS=$MODELS ./manage_mtp.sh start"
+echo "   cd $HERE && ./manage_mtp.sh start        # 文本模型"
+[ "$ENABLE_VL" = "1" ] && echo "   cd $HERE && VL=1 ./manage_mtp.sh start   # 视觉模型"
 if [ "$ENABLE_VL" = "1" ]; then
   echo "   视觉模型: smtek/Swift-Qwen3.8-27B:map-k4v-vl"
 else

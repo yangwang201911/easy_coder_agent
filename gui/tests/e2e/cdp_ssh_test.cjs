@@ -89,9 +89,19 @@ async function noTarget(port, title, ms) {
       if (String(await ev("document.getElementById('titlebar-name') && document.getElementById('titlebar-name').textContent")).includes("Coder Agent:")) break;
       await wait(250);
     }
+    // the settings modal is built asynchronously: wait for the connection tab
+    // to exist and become active before driving it
     const openConn = async () => {
-      await ev("document.getElementById('rail-settings').click()"); await wait(400);
-      await ev("[...document.querySelectorAll('#modal .tabs button')].find(b => b.dataset.p === 'connection').click()"); await wait(400);
+      await ev("document.getElementById('rail-settings').click()");
+      for (let i = 0; i < 40; i++) {
+        if (await ev("!!document.querySelector('#modal .settings .tabs button[data-p=connection]')")) break;
+        await wait(200);
+      }
+      await ev("[...document.querySelectorAll('#modal .settings .tabs button')].find(b => b.dataset.p === 'connection').click()");
+      for (let i = 0; i < 40; i++) {
+        if (await ev("!!document.querySelector('#modal .page[data-p=connection].active')")) break;
+        await wait(200);
+      }
     };
     const msg = () => ev("(document.querySelector('#modal .page[data-p=\"connection\"] .msg') || {}).textContent || ''");
     // switch to ssh mode and (re)show the host list
