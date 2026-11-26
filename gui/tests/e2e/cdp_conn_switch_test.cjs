@@ -14,7 +14,7 @@ const path = require("path");
 
 const ROOT = process.env.TEST_ROOT || path.resolve(__dirname, "..", "..", "..");
 const PORT = 8932; // isolated port so we own the server
-const B = path.join(__dirname, "..", "..", "..", "backend");
+const B = path.join(__dirname, "..", "..", "..");
 const srvLog = path.join(os.tmpdir(), "cdp-conn-switch-srv.log");
 let srv = null;
 function startSrv() {

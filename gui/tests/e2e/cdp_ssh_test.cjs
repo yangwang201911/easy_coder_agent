@@ -56,7 +56,7 @@ async function noTarget(port, title, ms) {
 (async () => {
   // real agent server, loopback only, with a token
   const srv = spawn(venvPython(), ["-m", "coder_agent.server", "--host", "127.0.0.1", "--port", String(SERVER_PORT), "--token", TOKEN],
-    { cwd: path.join(__dirname, "..", "..", "..", "backend"), stdio: ["ignore", "pipe", "pipe"], detached: true });
+    { cwd: path.join(__dirname, "..", "..", ".."), stdio: ["ignore", "pipe", "pipe"], detached: true });
   await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error("server did not start")), 30000);
     srv.stdout.on("data", (d) => { if (String(d).includes("WS_URL=")) { clearTimeout(t); res(); } }); });
 
