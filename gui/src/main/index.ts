@@ -17,7 +17,7 @@ function backendInfo(): { cmd: string; args: string[]; cwd: string } {
     const exe = process.platform === "win32" ? "coder-agent-server.exe" : "coder-agent-server";
     return { cmd: path.join(dir, exe), args: [], cwd: dir };
   }
-  const dir = path.resolve(__dirname, "../..");
+  const dir = path.resolve(__dirname, "../../..");
   const venv = process.platform === "win32"
     ? path.join(dir, ".venv", "Scripts", "python.exe")
     : path.join(dir, ".venv", "bin", "python");

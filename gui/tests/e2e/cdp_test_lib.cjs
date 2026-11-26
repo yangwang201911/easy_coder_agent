@@ -202,7 +202,7 @@ function connectCdp(wsUrl) {
 
 // The backend venv python (cross-platform: .venv/Scripts on Windows).
 function venvPython() {
-  const B = path.join(__dirname, "..", "..", "..", "backend");
+  const B = path.join(__dirname, "..", "..", "..");
   return path.join(B, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
 }
 

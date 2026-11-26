@@ -10,7 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const GUI = __dirname;
-const BACKEND = path.join(__dirname, "..", "..", "..", "backend");
+const BACKEND = path.join(__dirname, "..", "..", "..");
 const REMOTE_PORT = 8931;
 const IS_WIN = process.platform === "win32";
 const VENV_PY = path.join(BACKEND, ".venv", IS_WIN ? "Scripts" : "bin", IS_WIN ? "python.exe" : "python");
